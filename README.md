@@ -40,7 +40,7 @@ genome_repair_tools.py -q genome_to_repair.fasta -c reference_contigs.fasta --hi
 </p>
 
 ## Detailed usage instructions 
-https://share.note.sx/segoiu1h#eF7X6NbYz9CZp8+vxt5sYyQxO3Kgn5AHveYpFLrq0ME
+https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
 
 # Contact
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
