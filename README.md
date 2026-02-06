@@ -3,7 +3,7 @@ Genome Repair Tools (GRT) is a genomic repair toolkit primarily designed for fil
 ![流程图1 1](https://github.com/user-attachments/assets/4a0123fb-4988-415e-b17f-a1c0dbd5aa16)
 
 ## Installation
-### download software
+### Download software
 ```bash
 git clone  https://github.com/wzxie/Genome-Repair-Tools.git
 ```
