@@ -1,6 +1,7 @@
 # Genome-Repair-Tools
 Genome Repair Tools (GRT) is a genomic repair toolkit primarily designed for filling missing regions (Gaps) in genome FASTA files, with additional telomere recovery functionality.
-![流程图1 1](https://github.com/user-attachments/assets/4a0123fb-4988-415e-b17f-a1c0dbd5aa16)
+
+![流程图1 1](https://github.com/user-attachments/assets/62ce2b00-5166-4b34-9a81-fad947eaf2d4)
 
 ## Installation
 ### Download software
@@ -69,6 +70,7 @@ https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
 # Contact
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
 
-- Zhu Yirui: zyr18803205362@163.com
-- Zhao rupeng: 2247290650@qq.com
-- Xie wenzhao: wzxie@hebtu.edu.cn
+- Yi-Rui Zhu: zyr18803205362@163.com
+- Ru-Peng Zhao: 2247290650@qq.com
+- Wen-Zhao Xie: wzxie@hebtu.edu.cn
+- Zu-Wen Zhou: 784012725@qq.com
