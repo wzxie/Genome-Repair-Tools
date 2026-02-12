@@ -64,6 +64,16 @@ Providing raw sequencing data. The default will run these 5 assemblers: hifiasm,
 ```bash
 genome_repair_tools.py -q genome_to_repair.fasta -c reference_contigs.fasta --hifi HiFi_data.fastq.gz -t threads -o output_directory 
 ```
+## Sample data download
+### Download sample genome data (5MB)
+```wget https://github.com/wzxie/Genome-Repair-Tools/releases/download/v1.0-data/example_genome.fa```
+### Download sample sequencing data (71MB)
+```wget https://github.com/wzxie/Genome-Repair-Tools/releases/download/v1.0-data/example_HiFi.fastq.gz```
+### Test data usage: 
+Run the following command to generate five output directories: ```merged_contigs```, ```patch_repair```, ```correct_refill```, ```telomere_recover```, and ```assemble_fill```. The gap-filled test genome result, assembled_filled_renamed.fasta, can be found in the assemble_fill folder. The entire process takes approximately 5 minutes.
+
+```genome_repair_tools.py -q PATH/example_genome.fa --hifi PATH/example_HiFi.fastq.gz -t 32 -o output_directory```
+
 ## Detailed usage instructions 
 https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
 
