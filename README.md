@@ -85,6 +85,6 @@ https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
 
 - Yi-Rui Zhu: zyr18803205362@163.com
+- Zu-Wen Zhou: 784012725@qq.com
 - Ru-Peng Zhao: 2247290650@qq.com
 - Wen-Zhao Xie: wzxie@hebtu.edu.cn
-- Zu-Wen Zhou: 784012725@qq.com
