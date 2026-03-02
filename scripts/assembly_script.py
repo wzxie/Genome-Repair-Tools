@@ -919,37 +919,23 @@ nextgraph_options = -a 1
             print(f"nextdenovo output directory not found: {output_path}")
             return fasta_files
         
-        priority_files = [
-            "03.ctg_graph/nextgraph.assembly.contig.fasta",
-            "03.ctg_graph/nextgraph.assembly.fasta",
-            "assembly.fasta",
-            "contigs.fasta"
-        ]
+        # 只查找 nd.asm.fasta 文件
+        target_file = output_dir / "03.ctg_graph" / "nd.asm.fasta"
         
-        for filename in priority_files:
-            fasta_file = output_dir / filename
-            if fasta_file.exists() and fasta_file.stat().st_size > 0:
-                new_name = f"{self.name}.fa"
-                new_path = Path.cwd() / new_name
-                
-                print(f"Copying {fasta_file} → {new_path}")
-                shutil.copy2(fasta_file, new_path)
-                fasta_files.append(new_path)
-                return fasta_files
+        if target_file.exists() and target_file.stat().st_size > 0:
+            new_name = f"{self.name}.fa"
+            new_path = Path.cwd() / new_name
+            
+            file_size_mb = target_file.stat().st_size / (1024 * 1024)
+            print(f"Found nextDenovo assembly: {target_file} ({file_size_mb:.2f} MB)")
+            print(f"Copying to: {new_path}")
+            shutil.copy2(target_file, new_path)
+            fasta_files.append(new_path)
+        else:
+            print(f"nextDenovo assembly file not found at expected location: {target_file}")
+            print("Expected path: [output_prefix].nextDenovo/03.ctg_graph/nd.asm.fasta")
+            print("Skipping nextDenovo results")
         
-        backup_patterns = ["**/*.fasta", "**/*.fa", "**/*.fna"]
-        for pattern in backup_patterns:
-            for fasta_file in output_dir.glob(pattern):
-                if fasta_file.stat().st_size > 0:
-                    new_name = f"{self.name}.fa"
-                    new_path = Path.cwd() / new_name
-                    
-                    print(f"Copying {fasta_file} → {new_path}")
-                    shutil.copy2(fasta_file, new_path)
-                    fasta_files.append(new_path)
-                    return fasta_files
-        
-        print(f"No FASTA files found in {output_path}")
         return fasta_files
 
 
