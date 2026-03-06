@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 import json
 import tempfile
 import re
+import time
+import hashlib
 
 
 @dataclass
@@ -50,6 +52,9 @@ class AssemblyConfig:
     
     tools_to_run: List[str] = field(default_factory=lambda: ['all'])
     
+    estimated_genome_size: Optional[str] = None
+    estimated_genome_size_bp: Optional[float] = None
+    
     def __post_init__(self):
         self.validate_files()
     
@@ -75,6 +80,216 @@ class AssemblyConfig:
         with open(json_file, 'r') as f:
             config_dict = json.load(f)
         return cls.from_dict(config_dict)
+
+
+class ONTGenomeSizeEstimator:
+    
+    @staticmethod
+    def get_read_stats(file_path: Path) -> Dict[str, Any]:
+        stats = {
+            'total_bases': 0,
+            'total_reads': 0,
+            'long_reads_count': 0,
+            'long_reads_bases': 0,
+            'n50': 0,
+            'mean_length': 0
+        }
+        
+        try:
+            lengths = []
+            
+            if str(file_path).endswith('.gz'):
+                cmd = f"zcat {file_path} | awk 'NR%4==2 {{print length($0)}}' | head -100000"
+            else:
+                cmd = f"awk 'NR%4==2 {{print length($0)}}' {file_path} | head -100000"
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line:
+                        length = int(line.strip())
+                        lengths.append(length)
+                        stats['total_bases'] += length
+                        stats['total_reads'] += 1
+                        
+                        if length >= 10000:
+                            stats['long_reads_count'] += 1
+                            stats['long_reads_bases'] += length
+            
+            if lengths:
+                lengths.sort(reverse=True)
+                stats['mean_length'] = sum(lengths) / len(lengths)
+                
+                half_total = sum(lengths) / 2
+                cumulative = 0
+                for length in lengths:
+                    cumulative += length
+                    if cumulative >= half_total:
+                        stats['n50'] = length
+                        break
+        
+        except Exception as e:
+            print(f"Warning: Failed to get read stats for {file_path}: {e}")
+        
+        return stats
+    
+    @staticmethod
+    def estimate_from_long_reads_only(reads_files: List[str], 
+                                      target_depth: int = 30,
+                                      min_length: int = 10000) -> Optional[str]:
+        total_long_bases = 0
+        total_reads = 0
+        long_reads_ratio = 0
+        
+        for file_path in reads_files:
+            stats = ONTGenomeSizeEstimator.get_read_stats(Path(file_path))
+            total_long_bases += stats['long_reads_bases']
+            total_reads += stats['total_reads']
+            
+            if stats['total_bases'] > 0:
+                file_long_ratio = stats['long_reads_bases'] / stats['total_bases']
+                long_reads_ratio = max(long_reads_ratio, file_long_ratio)
+        
+        if total_long_bases == 0:
+            print("  警告: 没有找到足够的长reads (>=10kb)")
+            return None
+        
+        if long_reads_ratio == 0:
+            long_reads_ratio = 0.3
+        
+        estimated_total_bases = total_long_bases / long_reads_ratio
+        estimated_size_bp = estimated_total_bases / target_depth
+        
+        if estimated_size_bp >= 1e9:
+            return f"{estimated_size_bp/1e9:.1f}g"
+        elif estimated_size_bp >= 1e6:
+            return f"{int(estimated_size_bp/1e6)}m"
+        else:
+            return f"{int(estimated_size_bp/1000)}k"
+    
+    @staticmethod
+    def estimate_ont_with_meryl(reads_files: List[str], 
+                                k: int = 31, 
+                                threads: int = 32) -> Optional[str]:
+        try:
+            temp_dir = Path(tempfile.mkdtemp(prefix="ont_kmer_est_"))
+            
+            filtered_reads = temp_dir / "filtered_reads.fastq"
+            
+            print(f"  提取长reads进行k-mer分析...")
+            for file_path in reads_files:
+                if str(file_path).endswith('.gz'):
+                    cmd = f"zcat {file_path} | awk 'BEGIN{{RS=\"@\";FS=\"\\n\"}} length($2)>=10000 {{print \"@\"$0}}' >> {filtered_reads}"
+                else:
+                    cmd = f"awk 'BEGIN{{RS=\"@\";FS=\"\\n\"}} length($2)>=10000 {{print \"@\"$0}}' {file_path} >> {filtered_reads}"
+                
+                subprocess.run(cmd, shell=True, check=True, capture_output=True)
+            
+            if not filtered_reads.exists() or filtered_reads.stat().st_size == 0:
+                print("  没有足够的长reads进行k-mer分析")
+                return None
+            
+            meryl_db = temp_dir / "meryl_db"
+            
+            cmd = [
+                "meryl", f"k={k}", "count",
+                f"memory={threads*2}",
+                f"threads={threads}",
+                "output", str(meryl_db),
+                str(filtered_reads)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  meryl count failed: {result.stderr[:200]}")
+                return None
+            
+            kmer_hist = temp_dir / "kmer.hist"
+            cmd = f"meryl histogram {meryl_db} > {kmer_hist}"
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            if result.returncode != 0 or not kmer_hist.exists():
+                print(f"  meryl histogram failed")
+                return None
+            
+            with open(kmer_hist, 'r') as f:
+                lines = f.readlines()
+            
+            if len(lines) < 10:
+                print("  k-mer频谱数据不足")
+                return None
+            
+            total_kmers = 0
+            kmer_counts = []
+            for line in lines:
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        coverage = int(parts[0])
+                        count = int(parts[1])
+                        if coverage > 5:
+                            total_kmers += count
+                            kmer_counts.append((coverage, count))
+                    except:
+                        continue
+            
+            if not kmer_counts:
+                return None
+            
+            kmer_counts.sort(key=lambda x: x[1], reverse=True)
+            main_coverage = kmer_counts[0][0]
+            
+            genome_size_bp = total_kmers / main_coverage if main_coverage > 0 else 0
+            
+            if genome_size_bp <= 0:
+                return None
+            
+            if genome_size_bp >= 1e9:
+                return f"{genome_size_bp/1e9:.1f}g"
+            elif genome_size_bp >= 1e6:
+                return f"{int(genome_size_bp/1e6)}m"
+            else:
+                return f"{int(genome_size_bp/1000)}k"
+            
+        except Exception as e:
+            print(f"  ONT k-mer分析错误: {e}")
+            return None
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    @staticmethod
+    def cross_validate(results: List[str]) -> str:
+        if not results:
+            return "1g"
+        
+        numeric_sizes = []
+        for size_str in results:
+            try:
+                size_str = size_str.lower()
+                if size_str.endswith('g'):
+                    numeric_sizes.append(float(size_str[:-1]) * 1e9)
+                elif size_str.endswith('m'):
+                    numeric_sizes.append(float(size_str[:-1]) * 1e6)
+                elif size_str.endswith('k'):
+                    numeric_sizes.append(float(size_str[:-1]) * 1e3)
+                else:
+                    numeric_sizes.append(float(size_str))
+            except:
+                continue
+        
+        if not numeric_sizes:
+            return results[0]
+        
+        numeric_sizes.sort()
+        median_size = numeric_sizes[len(numeric_sizes)//2]
+        
+        if median_size >= 1e9:
+            return f"{median_size/1e9:.1f}g"
+        elif median_size >= 1e6:
+            return f"{int(median_size/1e6)}m"
+        else:
+            return f"{int(median_size/1000)}k"
 
 
 class GenomeSizeEstimator:
@@ -290,27 +505,54 @@ class GenomeSizeEstimator:
     @staticmethod
     def hybrid_estimation(reads_files: List[str], method: str = "hybrid",
                          k: int = 21, threads: int = 32, 
-                         target_depth: int = 30) -> str:
+                         target_depth: int = 30,
+                         read_type: str = "hifi") -> str:
         estimated_size = None
         
-        if method == "kmer" or method == "hybrid":
-            print("Trying meryl for k-mer analysis...")
-            if GenomeSizeEstimator.check_tool_availability("meryl"):
-                estimated_size = GenomeSizeEstimator.estimate_using_meryl(
-                    reads_files, k, threads
+        if read_type == "ont":
+            print("ONT数据: 使用专用估算方法...")
+            
+            print(" 尝试策略1: 基于长reads的文件大小估算...")
+            estimated_size = ONTGenomeSizeEstimator.estimate_from_long_reads_only(
+                reads_files, target_depth=target_depth, min_length=10000
+            )
+            if estimated_size:
+                print(f"  策略1结果: {estimated_size}")
+            
+            if not estimated_size and method in ["kmer", "hybrid"]:
+                print(" 尝试策略2: 大k-mer分析 (k=31)...")
+                estimated_size = ONTGenomeSizeEstimator.estimate_ont_with_meryl(
+                    reads_files, k=31, threads=threads
                 )
+                if estimated_size:
+                    print(f"  策略2结果: {estimated_size}")
             
             if not estimated_size:
-                print("meryl unavailable or failed, trying BBTools...")
-                estimated_size = GenomeSizeEstimator.estimate_using_bbtools(
-                    reads_files, k, threads
+                print(" 尝试策略3: 快速文件大小估算...")
+                estimated_size = GenomeSizeEstimator.estimate_from_file_size(
+                    reads_files, target_depth
                 )
+                print(f"  策略3结果: {estimated_size}")
         
-        if not estimated_size or method == "quick":
-            print("Using quick file size estimation...")
-            estimated_size = GenomeSizeEstimator.estimate_from_file_size(
-                reads_files, target_depth
-            )
+        else:
+            if method == "kmer" or method == "hybrid":
+                print("Trying meryl for k-mer analysis...")
+                if GenomeSizeEstimator.check_tool_availability("meryl"):
+                    estimated_size = GenomeSizeEstimator.estimate_using_meryl(
+                        reads_files, k, threads
+                    )
+                
+                if not estimated_size:
+                    print("meryl unavailable or failed, trying BBTools...")
+                    estimated_size = GenomeSizeEstimator.estimate_using_bbtools(
+                        reads_files, k, threads
+                    )
+            
+            if not estimated_size or method == "quick":
+                print("Using quick file size estimation...")
+                estimated_size = GenomeSizeEstimator.estimate_from_file_size(
+                    reads_files, target_depth
+                )
         
         return estimated_size or "1g"
 
@@ -377,7 +619,7 @@ def decompress_gz_files(input_files: List[str], temp_dir: Path,
         if f.endswith('.gz'):
             base_name = f_path.stem
             target = temp_dir / base_name
-            print(f"Decompressing {f} → {target}")
+            print(f"Decompressing {f} -> {target}")
             
             if use_pigz:
                 pigz_threads = min(threads, 8)
@@ -401,7 +643,7 @@ def decompress_gz_files(input_files: List[str], temp_dir: Path,
 
 
 def gfa_to_fasta_awk(gfa_file: Path, fasta_file: Path) -> bool:
-    print(f"Converting {gfa_file} → {fasta_file}")
+    print(f"Converting {gfa_file} -> {fasta_file}")
     
     try:
         cmd = f"awk '/^S/{{print \">\"$2; print $3}}' {gfa_file} > {fasta_file}"
@@ -612,10 +854,8 @@ class HifiasmTool(AssemblyTool):
         fasta_files = []
         base_dir = Path.cwd()
         
-        # 提取基础文件名（不带路径）
         output_name = Path(output_path).name
         
-        # 首先在当前目录查找
         search_patterns = [
             f"{output_name}.p_ctg.gfa",
             f"{output_name}*.p_ctg.gfa",
@@ -627,7 +867,6 @@ class HifiasmTool(AssemblyTool):
         
         found_gfa = None
         
-        # 先查找当前目录
         for pattern in search_patterns:
             try:
                 matching_files = list(base_dir.glob(pattern))
@@ -642,11 +881,9 @@ class HifiasmTool(AssemblyTool):
                 print(f"Pattern search error for {pattern}: {e}")
                 continue
         
-        # 如果没有找到，尝试查找与output_path相同的目录结构
         if not found_gfa:
             output_path_obj = Path(output_path)
             if output_path_obj.exists() and output_path_obj.is_dir():
-                # 如果output_path是一个目录，查找该目录
                 for pattern in ["*.p_ctg.gfa", "*.gfa"]:
                     try:
                         matching_files = list(output_path_obj.glob(pattern))
@@ -660,7 +897,6 @@ class HifiasmTool(AssemblyTool):
                     except Exception as e:
                         continue
             else:
-                # 检查output_path的父目录中是否有文件
                 parent_dir = output_path_obj.parent
                 if parent_dir.exists():
                     for pattern in [f"*{output_name}*.p_ctg.gfa", f"*{output_name}*.gfa"]:
@@ -676,14 +912,12 @@ class HifiasmTool(AssemblyTool):
                         except Exception as e:
                             continue
         
-        # 最后，递归查找所有子目录
         if not found_gfa:
             for pattern in ["**/*.p_ctg.gfa", "**/*.gfa"]:
                 try:
                     matching_files = list(base_dir.glob(pattern))
                     for gfa_file in matching_files:
                         if gfa_file.exists() and gfa_file.stat().st_size > 0:
-                            # 检查文件名是否包含hifiasm关键词
                             if "hifiasm" in gfa_file.name.lower() or "p_ctg" in gfa_file.name:
                                 found_gfa = gfa_file
                                 print(f"Found GFA file recursively: {gfa_file}")
@@ -705,11 +939,10 @@ class HifiasmTool(AssemblyTool):
             print(f"Current directory: {base_dir}")
             print(f"Output name: {output_name}")
             
-            # 列出所有可能的GFA文件帮助调试
             all_gfa_files = list(base_dir.glob("**/*.gfa"))
             if all_gfa_files:
                 print(f"All GFA files found:")
-                for gfa_file in all_gfa_files[:10]:  # 只显示前10个
+                for gfa_file in all_gfa_files[:10]:
                     print(f"  {gfa_file}")
         
         return fasta_files
@@ -743,7 +976,26 @@ class VerkkoTool(AssemblyTool):
             cmd += ["--cleanup"]
         
         cmd += ["--local-cpus", str(threads)]
-        mem_mb = config.verkko_memory_gb * 1024
+        
+        if config.estimated_genome_size_bp:
+            genome_size_mb = config.estimated_genome_size_bp / 1e6
+            
+            base_memory_gb = 128
+            base_genome_mb = 130
+            
+            recommended_memory = int(base_memory_gb * (genome_size_mb / base_genome_mb))
+            
+            min_memory = 64
+            max_memory = 512
+            recommended_memory = max(min_memory, min(recommended_memory, max_memory))
+            
+            mem_gb = recommended_memory
+            print(f"verkko: Based on estimated genome size {genome_size_mb:.0f}Mb, using {mem_gb}GB memory")
+        else:
+            mem_gb = config.verkko_memory_gb
+            print(f"verkko: Using configured memory: {mem_gb}GB")
+        
+        mem_mb = mem_gb * 1024
         cmd += ["--local-memory", str(mem_mb)]
         
         return cmd, out_dir
@@ -767,7 +1019,7 @@ class VerkkoTool(AssemblyTool):
                         new_name = f"{self.name}.fa"
                         new_path = Path.cwd() / new_name
                         
-                        print(f"Copying {fasta_file} → {new_path}")
+                        print(f"Copying {fasta_file} -> {new_path}")
                         shutil.copy2(fasta_file, new_path)
                         fasta_files.append(new_path)
                         return fasta_files
@@ -782,7 +1034,7 @@ class VerkkoTool(AssemblyTool):
                             new_name = f"{self.name}.fa"
                             new_path = Path.cwd() / new_name
                             
-                            print(f"Copying {fasta_file} → {new_path}")
+                            print(f"Copying {fasta_file} -> {new_path}")
                             shutil.copy2(fasta_file, new_path)
                             fasta_files.append(new_path)
                             return fasta_files
@@ -794,22 +1046,29 @@ class VerkkoTool(AssemblyTool):
 class NextDenovoTool(AssemblyTool):
     
     def __init__(self):
-        super().__init__("nextdenovo", ['hifi', 'clr'])
-        self.description = "PacBio HiFi/CLR assembly tool - automatic genome size estimation"
+        super().__init__("nextdenovo", ['hifi', 'ont_ul', 'clr'])
+        self.description = "ONT/HiFi/CLR assembly tool - automatic genome size estimation"
     
     def build_command(self, data: Dict[str, Any], config: AssemblyConfig) -> Tuple[List[str], str]:
         workdir = f"{data['output_prefix']}.nextDenovo"
         Path(workdir).mkdir(parents=True, exist_ok=True)
         cfg_file = f"{workdir}/run.cfg"
         
-        read_type = "hifi"
-        if data.get('hifi'):
+        read_type = "ont"
+        if data.get('ont_ul'):
+            input_files = data['ont_ul']
+            read_type = "ont"
+            print("nextDenovo: Using ONT data")
+        elif data.get('hifi'):
             input_files = data['hifi']
+            read_type = "hifi"
+            print("nextDenovo: Using HiFi data")
         elif data.get('clr'):
             input_files = data['clr']
             read_type = "clr"
+            print("nextDenovo: Using CLR data")
         else:
-            print("nextDenovo requires HiFi or CLR input.")
+            print("nextDenovo requires ONT, HiFi, or CLR input.")
             return [], ""
         
         with open(f"{workdir}/input.fofn", 'w') as f:
@@ -840,22 +1099,38 @@ class NextDenovoTool(AssemblyTool):
         need_estimation = config.auto_estimate_genome and not user_specified_size
         
         if need_estimation:
-            print(f"nextDenovo: Automatically estimating genome size...")
-            estimated_genome_size = GenomeSizeEstimator.hybrid_estimation(
-                reads_files=input_files,
-                method=config.estimate_method,
-                k=config.kmer_size,
-                threads=config.threads,
-                target_depth=config.target_depth
-            )
-            config.nextdenovo_genome_size = estimated_genome_size
-            print(f"nextDenovo using estimated genome size: {config.nextdenovo_genome_size}")
+            print(f"nextDenovo: Using pre-estimated genome size...")
+            if config.estimated_genome_size:
+                config.nextdenovo_genome_size = config.estimated_genome_size
+                print(f"nextDenovo using pre-estimated genome size: {config.nextdenovo_genome_size}")
+            else:
+                print(f"nextDenovo: Estimating genome size...")
+                estimated_genome_size = GenomeSizeEstimator.hybrid_estimation(
+                    reads_files=input_files,
+                    method=config.estimate_method,
+                    k=config.kmer_size if read_type != "ont" else 31,
+                    threads=config.threads,
+                    target_depth=config.target_depth,
+                    read_type=read_type
+                )
+                config.nextdenovo_genome_size = estimated_genome_size
+                print(f"nextDenovo using estimated genome size: {config.nextdenovo_genome_size}")
         elif user_specified_size:
             print(f"nextDenovo using user-specified genome size: {config.nextdenovo_genome_size}")
         else:
             print(f"nextDenovo using default genome size: {config.nextdenovo_genome_size}")
         
         read_cutoff = self.adjust_read_cutoff(config.nextdenovo_genome_size)
+        
+        if read_type == "ont":
+            minimap2_raw = f"-t {per_task_threads} -x ava-ont"
+            minimap2_cns = f"-t {per_task_threads} -x ava-ont -k 17 -w 17 --minlen 200 --maxhan1 1000"
+        elif read_type == "hifi":
+            minimap2_raw = f"-t {per_task_threads} -x ava-pb"
+            minimap2_cns = f"-t {per_task_threads} -x ava-pb -k 17 -w 17 --minlen 200 --maxhan1 1000"
+        else:
+            minimap2_raw = f"-t {per_task_threads} -x ava-pb"
+            minimap2_cns = f"-t {per_task_threads} -x ava-pb -k 17 -w 17 --minlen 200 --maxhan1 1000"
         
         config_content = f"""
 [General]
@@ -874,12 +1149,12 @@ workdir = {workdir}
 read_cutoff = {read_cutoff}
 genome_size = {config.nextdenovo_genome_size}
 sort_options = -m 20g -t {per_task_threads}
-minimap2_options_raw = -t {per_task_threads}
+minimap2_options_raw = {minimap2_raw}
 pa_correction = {pa_correction}
 correction_options = -p {per_task_threads}
 
 [assemble_option]
-minimap2_options_cns = -t {per_task_threads}
+minimap2_options_cns = {minimap2_cns}
 nextgraph_options = -a 1
 """
         
@@ -887,7 +1162,8 @@ nextgraph_options = -a 1
             f.write(config_content.strip())
         
         print(f"nextDenovo configuration file generated: {cfg_file}")
-        print(f"Thread allocation: {threads} total threads → {parallel_jobs} parallel tasks × {per_task_threads} threads/task")
+        print(f"Thread allocation: {threads} total threads -> {parallel_jobs} parallel tasks x {per_task_threads} threads/task")
+        print(f"Read type: {read_type}")
         
         config.nextdenovo_genome_size = original_genome_size
         
@@ -919,7 +1195,6 @@ nextgraph_options = -a 1
             print(f"nextdenovo output directory not found: {output_path}")
             return fasta_files
         
-        # 只查找 nd.asm.fasta 文件
         target_file = output_dir / "03.ctg_graph" / "nd.asm.fasta"
         
         if target_file.exists() and target_file.stat().st_size > 0:
@@ -934,7 +1209,12 @@ nextgraph_options = -a 1
         else:
             print(f"nextDenovo assembly file not found at expected location: {target_file}")
             print("Expected path: [output_prefix].nextDenovo/03.ctg_graph/nd.asm.fasta")
-            print("Skipping nextDenovo results")
+            
+            alt_files = list(output_dir.glob("**/*.fasta")) + list(output_dir.glob("**/*.fa"))
+            if alt_files:
+                print(f"Found alternative FASTA files:")
+                for f in alt_files[:3]:
+                    print(f"  {f}")
         
         return fasta_files
 
@@ -957,26 +1237,36 @@ class FlyeTool(AssemblyTool):
         need_estimation = config.auto_estimate_genome and not user_specified_size
         
         if need_estimation:
-            print(f"Flye: Automatically estimating genome size...")
-            
-            input_files = []
-            if data.get('hifi'):
-                input_files.extend(data['hifi'])
-            if data.get('ont_ul'):
-                input_files.extend(data['ont_ul'])
-            if data.get('clr'):
-                input_files.extend(data['clr'])
-            
-            estimated_genome_size = GenomeSizeEstimator.hybrid_estimation(
-                reads_files=input_files,
-                method=config.estimate_method,
-                k=config.kmer_size,
-                threads=config.threads,
-                target_depth=config.target_depth
-            )
-            
-            print(f"Flye using estimated genome size: {estimated_genome_size}")
-            config.flye_genome_size = estimated_genome_size
+            print(f"Flye: Using pre-estimated genome size...")
+            if config.estimated_genome_size:
+                config.flye_genome_size = config.estimated_genome_size
+                print(f"Flye using pre-estimated genome size: {config.flye_genome_size}")
+            else:
+                print(f"Flye: Estimating genome size...")
+                
+                input_files = []
+                read_type = "hifi"
+                if data.get('hifi'):
+                    input_files.extend(data['hifi'])
+                    read_type = "hifi"
+                if data.get('ont_ul'):
+                    input_files.extend(data['ont_ul'])
+                    read_type = "ont"
+                if data.get('clr'):
+                    input_files.extend(data['clr'])
+                    read_type = "clr"
+                
+                estimated_genome_size = GenomeSizeEstimator.hybrid_estimation(
+                    reads_files=input_files,
+                    method=config.estimate_method,
+                    k=config.kmer_size if read_type != "ont" else 31,
+                    threads=config.threads,
+                    target_depth=config.target_depth,
+                    read_type=read_type
+                )
+                
+                print(f"Flye using estimated genome size: {estimated_genome_size}")
+                config.flye_genome_size = estimated_genome_size
         elif user_specified_size:
             print(f"Flye using user-specified genome size: {config.flye_genome_size}")
         else:
@@ -1017,7 +1307,7 @@ class FlyeTool(AssemblyTool):
                 new_name = f"{self.name}.fa"
                 new_path = Path.cwd() / new_name
                 
-                print(f"Copying {fasta_file} → {new_path}")
+                print(f"Copying {fasta_file} -> {new_path}")
                 shutil.copy2(fasta_file, new_path)
                 fasta_files.append(new_path)
                 return fasta_files
@@ -1029,7 +1319,7 @@ class FlyeTool(AssemblyTool):
                     new_name = f"{self.name}.fa"
                     new_path = Path.cwd() / new_name
                     
-                    print(f"Copying {fasta_file} → {new_path}")
+                    print(f"Copying {fasta_file} -> {new_path}")
                     shutil.copy2(fasta_file, new_path)
                     fasta_files.append(new_path)
                     return fasta_files
@@ -1043,6 +1333,7 @@ class ShastaTool(AssemblyTool):
     def __init__(self):
         super().__init__("shasta", ['hifi', 'ont_ul', 'clr'])
         self.description = "ONT/HiFi fast assembly tool"
+        self.temp_dir = None
     
     def build_command(self, data: Dict[str, Any], config: AssemblyConfig) -> Tuple[List[str], str]:
         out_dir = f"{data['output_prefix']}.shasta"
@@ -1079,15 +1370,16 @@ class ShastaTool(AssemblyTool):
             print("Shasta requires ONT / HiFi / CLR input.")
             return [], ""
         
-        temp_dir_name = f".tmp_shasta_{data['output_prefix']}"
-        temp_dir = Path(temp_dir_name)
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Temporary decompression directory: {temp_dir}")
+        import tempfile
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="shasta_tmp_"))
+        print(f"Temporary decompression directory: {self.temp_dir}")
         
         try:
-            uncompressed_files = decompress_gz_files(input_files, temp_dir, threads)
+            uncompressed_files = decompress_gz_files(input_files, self.temp_dir, threads)
         except Exception as e:
             print(f"Decompression failed: {e}")
+            if self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
             return [], ""
         
         cmd = [
@@ -1104,7 +1396,8 @@ class ShastaTool(AssemblyTool):
         cmd += ["--memoryBacking", config.shasta_memory_backing]
         
         print(f"Shasta configuration file: {shasta_config}")
-        print(f"Note: Temporary decompressed files are in {temp_dir}")
+        print(f"Note: Temporary decompressed files are in {self.temp_dir}")
+        
         return cmd, out_dir
     
     def process_output(self, output_path: str) -> List[Path]:
@@ -1123,24 +1416,36 @@ class ShastaTool(AssemblyTool):
                 new_name = f"{self.name}.fa"
                 new_path = Path.cwd() / new_name
                 
-                print(f"Copying {fasta_file} → {new_path}")
+                print(f"Copying {fasta_file} -> {new_path}")
                 shutil.copy2(fasta_file, new_path)
                 fasta_files.append(new_path)
-                return fasta_files
+                break
         
-        backup_patterns = ["*.fasta", "*.fa"]
-        for pattern in backup_patterns:
-            for fasta_file in output_dir.glob(pattern):
-                if fasta_file.stat().st_size > 0:
-                    new_name = f"{self.name}.fa"
-                    new_path = Path.cwd() / new_name
-                    
-                    print(f"Copying {fasta_file} → {new_path}")
-                    shutil.copy2(fasta_file, new_path)
-                    fasta_files.append(new_path)
-                    return fasta_files
+        if not fasta_files:
+            backup_patterns = ["*.fasta", "*.fa"]
+            for pattern in backup_patterns:
+                for fasta_file in output_dir.glob(pattern):
+                    if fasta_file.exists() and fasta_file.stat().st_size > 0:
+                        new_name = f"{self.name}.fa"
+                        new_path = Path.cwd() / new_name
+                        
+                        print(f"Copying {fasta_file} -> {new_path}")
+                        shutil.copy2(fasta_file, new_path)
+                        fasta_files.append(new_path)
+                        break
+                if fasta_files:
+                    break
         
-        print(f"No FASTA files found in {output_path}")
+        if self.temp_dir and self.temp_dir.exists():
+            try:
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
+                print(f"Cleaned up temporary directory: {self.temp_dir}")
+            except Exception as e:
+                print(f"Warning: Failed to clean up temporary directory {self.temp_dir}: {e}")
+        
+        if not fasta_files:
+            print(f"No FASTA files found in {output_path}")
+        
         return fasta_files
 
 
@@ -1175,10 +1480,87 @@ class AssemblyPipeline:
                 available.append(tool_name)
         return available
     
+    def _parse_genome_size(self, size_str: str) -> float:
+        size_str = size_str.lower().strip()
+        try:
+            if size_str.endswith('g'):
+                return float(size_str[:-1]) * 1e9
+            elif size_str.endswith('m'):
+                return float(size_str[:-1]) * 1e6
+            elif size_str.endswith('k'):
+                return float(size_str[:-1]) * 1e3
+            else:
+                return float(size_str)
+        except:
+            return 130e6
+    
     def run(self, selected_tools: Optional[List[str]] = None) -> Dict[str, Any]:
         print_title()
         
         data = self.prepare_data()
+        
+        if self.config.auto_estimate_genome:
+            print("\n" + "="*60)
+            print("STEP 1: Estimating genome size for all tools...")
+            print("="*60)
+            
+            all_reads = []
+            if data.get('hifi'):
+                all_reads.extend(data['hifi'])
+            if data.get('ont_ul'):
+                all_reads.extend(data['ont_ul'])
+            if data.get('clr'):
+                all_reads.extend(data['clr'])
+            
+            if not all_reads:
+                print("Error: No input files found for estimation")
+                return {}
+            
+            read_type = "hifi"
+            if data.get('ont_ul'):
+                read_type = "ont"
+            elif data.get('clr'):
+                read_type = "clr"
+            
+            print(f"Input data type: {read_type.upper()}")
+            print(f"Estimation method: {self.config.estimate_method}")
+            print(f"Target depth: {self.config.target_depth}x")
+            
+            estimated_size = GenomeSizeEstimator.hybrid_estimation(
+                reads_files=all_reads,
+                method=self.config.estimate_method,
+                k=self.config.kmer_size if read_type != "ont" else 31,
+                threads=self.config.threads,
+                target_depth=self.config.target_depth,
+                read_type=read_type
+            )
+            
+            self.config.estimated_genome_size = estimated_size
+            self.config.estimated_genome_size_bp = self._parse_genome_size(estimated_size)
+            
+            print(f"\nEstimated genome size: {estimated_size}")
+            print(f"   ({self.config.estimated_genome_size_bp/1e6:.1f} Mb)")
+            
+            if 'verkko' in (selected_tools or self.config.tools_to_run):
+                genome_size_mb = self.config.estimated_genome_size_bp / 1e6
+                
+                base_memory_gb = 128
+                base_genome_mb = 130
+                
+                recommended_memory = int(base_memory_gb * (genome_size_mb / base_genome_mb))
+                
+                min_memory = 64
+                max_memory = 512
+                recommended_memory = max(min_memory, min(recommended_memory, max_memory))
+                
+                print(f"\nBased on estimated genome size {genome_size_mb:.0f}Mb, recommended verkko memory: {recommended_memory}GB")
+                
+                if self.config.verkko_memory_gb == 64:
+                    self.config.verkko_memory_gb = recommended_memory
+                    print(f"Automatically setting verkko_memory_gb = {recommended_memory}")
+                else:
+                    print(f"Using user-specified verkko_memory_gb = {self.config.verkko_memory_gb}")
+        
         available_tools = self.get_available_tools(data)
         
         if not available_tools:
@@ -1197,10 +1579,14 @@ class AssemblyPipeline:
             print("No available tools selected")
             return {}
         
+        print(f"\n{'='*60}")
+        print("STEP 2: Running selected assembly tools...")
+        print("="*60)
         print(f"Will run the following tools: {', '.join(selected_tools)}")
         print(f"Output prefix: {self.config.output_prefix}")
         print(f"Thread count: {self.config.threads}")
-        print(f"Automatic genome estimation: {'ON' if self.config.auto_estimate_genome else 'OFF'}")
+        if self.config.estimated_genome_size:
+            print(f"Estimated genome size: {self.config.estimated_genome_size}")
         
         self.results = {}
         self.completed_tools = []
@@ -1294,6 +1680,8 @@ class AssemblyPipeline:
         summary.append(f"Output prefix: {self.config.output_prefix}")
         summary.append(f"Thread count: {self.config.threads}")
         summary.append(f"Automatic genome estimation: {'ON' if self.config.auto_estimate_genome else 'OFF'}")
+        if self.config.estimated_genome_size:
+            summary.append(f"Estimated genome size: {self.config.estimated_genome_size}")
         summary.append("")
         
         summary.append("Input data:")
@@ -1301,14 +1689,14 @@ class AssemblyPipeline:
                                 ('ONT UL', self.config.ont_ul_files),
                                 ('CLR', self.config.clr_files)]:
             if files:
-                summary.append(f"  • {data_type}: {len(files)} files")
+                summary.append(f"  - {data_type}: {len(files)} files")
         
         summary.append("\nRun results:")
         for tool_name, result in self.results.items():
             if tool_name != 'merged':
-                status_icon = "✓" if result['status'] == 'success' else "✗"
+                status_text = "success" if result['status'] == 'success' else "failed"
                 file_count = len(result['files'])
-                summary.append(f"  • {tool_name}: {status_icon} {file_count} files")
+                summary.append(f"  - {tool_name}: {status_text} ({file_count} files)")
         
         if 'merged' in self.results:
             merged_file = self.results['merged']['file']
@@ -1362,9 +1750,9 @@ def collect_tool_config_interactive() -> Dict[str, Any]:
     if auto_estimate_genome:
         target_depth = int(ask("Target sequencing depth (X):", default="30"))
     
-    verkko_memory_gb = int(ask("verkko: Maximum memory (GB):", default="64"))
-    nextdenovo_genome_size = ask("nextDenovo: Estimated genome size (e.g., 3g, 1.5m):", default="1g")
-    flye_genome_size = ask("Flye: Estimated genome size (e.g., 3g):", default="1g")
+    verkko_memory_gb = int(ask("verkko: Maximum memory (GB) [自动估算将覆盖此值]:", default="64"))
+    nextdenovo_genome_size = ask("nextDenovo: Estimated genome size (e.g., 3g, 1.5m) [自动估算将覆盖]:", default="1g")
+    flye_genome_size = ask("Flye: Estimated genome size (e.g., 3g) [自动估算将覆盖]:", default="1g")
     flye_iterations = int(ask("Flye: Polishing iterations:", default="1"))
     flye_nano_type = ask("Flye: ONT data type?", options=['raw', 'hq'], default='hq')
     shasta_memory_backing = ask("Shasta: memoryBacking (4K recommended, 2M requires large pages):", 
@@ -1454,22 +1842,10 @@ def parse_arguments():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run only hifiasm and flye, automatically estimate genome size
   %(prog)s -hifi reads.fastq.gz -t 64 -o my_assembly --run-hifiasm --run-flye
-  
-  # Run all supported software, use k-mer analysis for genome size estimation
   %(prog)s -hifi hifi.fastq.gz -t 64 --run-all --estimate-method kmer
-  
-  # Disable automatic estimation, use specified size
   %(prog)s -hifi hifi.fastq.gz -t 64 --run-nextdenovo --no-auto-estimate --nextdenovo-genome-size 100m
-  
-  # Hybrid estimation method (default)
   %(prog)s -hifi hifi.fastq.gz -t 64 --run-all --estimate-method hybrid
-  
-Genome estimation method descriptions:
-  quick:   Quick estimation based on file size (fastest)
-  kmer:    Use k-mer analysis for estimation (most accurate but slower)
-  hybrid:  Try k-mer first, fall back to quick if fails (default)
         """
     )
     
@@ -1504,7 +1880,7 @@ Genome estimation method descriptions:
     parser.add_argument('--flye-threads', type=int, help='flye-specific thread count')
     parser.add_argument('--shasta-threads', type=int, help='shasta-specific thread count')
     
-    parser.add_argument('--verkko-memory', type=int, default=64, help='verkko maximum memory (GB)')
+    parser.add_argument('--verkko-memory', type=int, default=64, help='verkko maximum memory (GB) [自动估算将覆盖]')
     parser.add_argument('--flye-genome-size', default='1g', help='Flye genome size estimate (overrides automatic estimation)')
     parser.add_argument('--nextdenovo-genome-size', default='1g', help='nextDenovo genome size estimate (overrides automatic estimation)')
     parser.add_argument('--flye-iterations', type=int, default=1, help='Flye polishing iterations')
