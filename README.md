@@ -79,8 +79,8 @@ Run the following command to generate five output directories: ```merged_contigs
 genome_repair_tools.py -q PATH/example_genome.fa --hifi PATH/example_HiFi.fastq.gz -t 32 -o output_directory
 ```
 ## Detailed usage instructions 
-Chinese version:https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
-English version:https://share.note.sx/6ga80su1#G3Yetb5y7mtHswv4QqC58Q9fnXQ0wfNgnxU+xIpMOwM
+- Chinese version: https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
+- English version: https://share.note.sx/6ga80su1#G3Yetb5y7mtHswv4QqC58Q9fnXQ0wfNgnxU+xIpMOwM
 # Contact
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
 
