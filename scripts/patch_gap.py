@@ -2,6 +2,7 @@
 """
 Genome Gap Patching Tool - Unified API Version based on minimap2
 Provides consistent API design with extract_gap_patches.py
+Supports multiple patch attempts sequentially until success
 """
 
 import sys
@@ -96,6 +97,47 @@ class GenomeGapPatcherAPI:
         elif level == "debug":
             self.logger.debug(message)
     
+    def _load_all_matching_patches(self, patch_file: str, gap_position: int) -> List[Dict]:
+        """
+        Load all patch sequences matching the gap position
+        
+        Args:
+            patch_file: Patch FASTA file
+            gap_position: Gap position
+            
+        Returns:
+            List of all matching patches
+        """
+        try:
+            patch_records = list(SeqIO.parse(patch_file, "fasta"))
+            matching_patches = []
+            
+            for record in patch_records:
+                header = record.description
+                patch_info = self._parse_patch_header(header)
+                
+                if patch_info.get('gap_position') == gap_position:
+                    patch_data = {
+                        'sequence': str(record.seq).upper(),
+                        'header': header,
+                        'info': patch_info,
+                        'record': record
+                    }
+                    matching_patches.append(patch_data)
+                    
+                    self.log(f"  Found patch: {header[:60]}...", "debug")
+            
+            if matching_patches:
+                self.log(f"Found {len(matching_patches)} patches for gap position {gap_position:,}", "info")
+            else:
+                self.log(f"No patches found for gap position {gap_position:,}", "warning")
+            
+            return matching_patches
+            
+        except Exception as e:
+            self.log(f"Failed to read patch sequences: {e}", "error")
+            raise
+    
     def patch_gap(
         self,
         reference_fasta: str,
@@ -114,11 +156,11 @@ class GenomeGapPatcherAPI:
         **kwargs
     ) -> Dict[str, Any]:
         """
-        Patch gap in genome
+        Patch gap in genome - will try multiple patches sequentially until success
         
         Args:
             reference_fasta: Target chromosome/genome FASTA file
-            patch_fasta: Patch sequence FASTA file
+            patch_fasta: Patch sequence FASTA file (can contain multiple patches for same gap)
             gap_position: Gap start coordinate
             output_fasta: Output patched FASTA file
             chromosome: Specify chromosome name (optional, if None use first sequence)
@@ -131,7 +173,7 @@ class GenomeGapPatcherAPI:
             require_both_matches: Require both left and right matches
             output_json: JSON report file path (optional)
             **kwargs: Other parameters
-            
+                
         Returns:
             Dictionary containing patching results
         """
@@ -150,11 +192,12 @@ class GenomeGapPatcherAPI:
         self.log("Reading chromosome sequence...", "info")
         chr_record, chr_seq = self._load_chromosome_sequence(reference_fasta, chromosome)
         
-        self.log("Parsing patch sequence...", "info")
-        selected_patch = self._load_patch_sequence(patch_fasta, gap_position)
+        self.log("Parsing patch sequences...", "info")
+        # Load all matching patches
+        all_patches = self._load_all_matching_patches(patch_fasta, gap_position)
         
-        if not selected_patch:
-            raise ValueError(f"No patch sequence matching gap position {gap_position} found")
+        if not all_patches:
+            raise ValueError(f"No patch sequences found for gap position {gap_position}")
         
         config = {
             'minimap2_mode': minimap2_mode,
@@ -167,53 +210,118 @@ class GenomeGapPatcherAPI:
         }
         config.update(kwargs)
         
-        patcher = Minimap2GapPatcher(config, logger=self.logger)
+        # Record attempt history
+        attempt_history = []
+        last_error = None
         
-        self.log(f"\n{'='*60}", "info")
-        self.log(f"Starting to patch gap position: {gap_position:,}", "info")
-        self.log(f"{'='*60}", "info")
+        # Try each patch sequentially
+        for attempt_num, selected_patch in enumerate(all_patches, 1):
+            self.log(f"\n{'='*60}", "info")
+            self.log(f"Attempt {attempt_num}/{len(all_patches)} for gap position: {gap_position:,}", "info")
+            self.log(f"Using patch: {selected_patch['header'][:80]}...", "info")
+            self.log(f"Patch length: {len(selected_patch['sequence']):,} bp", "info")
+            self.log(f"{'='*60}", "info")
+            
+            try:
+                patcher = Minimap2GapPatcher(config, logger=self.logger)
+                
+                result = patcher.find_matching_regions(
+                    gap_position,
+                    selected_patch['sequence'],
+                    chr_seq
+                )
+                
+                if result['success']:
+                    # Found matches, try to apply patch
+                    try:
+                        patched_seq, patch_details = patcher.apply_patch(
+                            chr_seq, gap_position, result['matches']
+                        )
+                        
+                        # Save successful result
+                        self._save_patched_sequence(chr_record.id, patched_seq, output_fasta)
+                        
+                        result_summary = self._create_result_summary(
+                            chr_seq=chr_seq,
+                            patched_seq=patched_seq,
+                            chr_record=chr_record,
+                            selected_patch=selected_patch,
+                            patch_details=patch_details,
+                            parameters=config,
+                            gap_position=gap_position,
+                            elapsed_time=time.time() - start_time
+                        )
+                        
+                        # Add attempt history
+                        result_summary['attempt_history'] = attempt_history
+                        result_summary['successful_attempt'] = attempt_num
+                        
+                        if output_json:
+                            self._save_results_to_json(result_summary, output_json)
+                            self.log(f"JSON report saved: {output_json}", "info")
+                        
+                        self._print_summary(result_summary)
+                        
+                        self._cleanup_temp_files()
+                        
+                        self.log(f"✓ Successfully patched using attempt #{attempt_num}!", "info")
+                        return result_summary
+                        
+                    except Exception as e:
+                        error_msg = f"Failed to apply patch: {e}"
+                        self.log(error_msg, "warning")
+                        attempt_history.append({
+                            'attempt': attempt_num,
+                            'patch_header': selected_patch['header'],
+                            'success': False,
+                            'error': error_msg
+                        })
+                        last_error = error_msg
+                        continue  # Try next patch
+                else:
+                    error_msg = result.get('error', 'Unknown error')
+                    self.log(f"✗ Attempt {attempt_num} failed: {error_msg}", "warning")
+                    attempt_history.append({
+                        'attempt': attempt_num,
+                        'patch_header': selected_patch['header'],
+                        'success': False,
+                        'error': error_msg
+                    })
+                    last_error = error_msg
+                    continue  # Try next patch
+                    
+            except Exception as e:
+                error_msg = str(e)
+                self.log(f"✗ Attempt {attempt_num} error: {error_msg}", "error")
+                attempt_history.append({
+                    'attempt': attempt_num,
+                    'patch_header': selected_patch['header'],
+                    'success': False,
+                    'error': error_msg
+                })
+                last_error = error_msg
+                continue  # Try next patch
         
-        result = patcher.find_matching_regions(
-            gap_position,
-            selected_patch['sequence'],
-            chr_seq
-        )
+        # All patches failed
+        error_msg = f"All {len(all_patches)} patches failed. Last error: {last_error}"
+        self.log(error_msg, "error")
         
-        if not result['success']:
-            error_msg = result.get('error', 'Unknown error')
-            raise RuntimeError(f"Patching failed: {error_msg}")
+        # Save failure report
+        if output_json:
+            failure_summary = {
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'gap_position': gap_position,
+                'reference': reference_fasta,
+                'patch_file': patch_fasta,
+                'total_patches': len(all_patches),
+                'attempt_history': attempt_history,
+                'last_error': last_error,
+                'success': False
+            }
+            self._save_results_to_json(failure_summary, output_json)
+            self.log(f"Failure report saved: {output_json}", "info")
         
-        try:
-            patched_seq, patch_details = patcher.apply_patch(
-                chr_seq, gap_position, result['matches']
-            )
-            
-            self._save_patched_sequence(chr_record.id, patched_seq, output_fasta)
-            
-            result_summary = self._create_result_summary(
-                chr_seq=chr_seq,
-                patched_seq=patched_seq,
-                chr_record=chr_record,
-                selected_patch=selected_patch,
-                patch_details=patch_details,
-                parameters=config,
-                gap_position=gap_position,
-                elapsed_time=time.time() - start_time
-            )
-            
-            if output_json:
-                self._save_results_to_json(result_summary, output_json)
-                self.log(f"JSON report saved: {output_json}", "info")
-            
-            self._print_summary(result_summary)
-            
-            self._cleanup_temp_files()
-            
-            return result_summary
-            
-        except Exception as e:
-            self.log(f"Failed to apply patch: {e}", "error")
-            raise
+        raise RuntimeError(error_msg)
     
     def _check_dependencies(self):
         """Check required dependencies"""
@@ -259,35 +367,6 @@ class GenomeGapPatcherAPI:
             
         except Exception as e:
             self.log(f"Failed to read chromosome sequence: {e}", "error")
-            raise
-    
-    def _load_patch_sequence(self, patch_file: str, gap_position: int) -> Optional[Dict]:
-        """Load patch sequence"""
-        try:
-            patch_records = list(SeqIO.parse(patch_file, "fasta"))
-            
-            for record in patch_records:
-                header = record.description
-                patch_info = self._parse_patch_header(header)
-                
-                if patch_info.get('gap_position') == gap_position:
-                    selected_patch = {
-                        'sequence': str(record.seq).upper(),
-                        'header': header,
-                        'info': patch_info,
-                        'record': record
-                    }
-                    
-                    self.log(f"Found matching patch: {header[:80]}...", "info")
-                    self.log(f"  Patch length: {len(selected_patch['sequence']):,} bp", "info")
-                    self.log(f"  Chromosome: {patch_info.get('chromosome', 'unknown')}", "info")
-                    
-                    return selected_patch
-            
-            return None
-            
-        except Exception as e:
-            self.log(f"Failed to read patch sequence: {e}", "error")
             raise
     
     def _parse_patch_header(self, header: str) -> Dict[str, Any]:
@@ -362,7 +441,10 @@ class GenomeGapPatcherAPI:
                 'id': chr_record.id,
                 'description': chr_record.description,
                 'original_length': len(chr_seq)
-            }
+            },
+            # These will be filled later
+            'attempt_history': [],
+            'successful_attempt': None
         }
         
         return result_summary
@@ -381,7 +463,7 @@ class GenomeGapPatcherAPI:
         stats = result_summary['statistics']
         
         self.log("\n" + "="*60, "info")
-        self.log("Genome gap patching completed!", "info")
+        self.log("✓ Genome gap patching completed successfully!", "info")
         self.log("="*60, "info")
         
         self.log(f"Processing time: {stats['processing_time_seconds']:.2f} seconds", "info")
@@ -399,7 +481,14 @@ class GenomeGapPatcherAPI:
             self.log(f"Right flank match score: {match_quality.get('right_score', 0):.3f} "
                   f"(MAPQ: {match_quality.get('right_mapq', 0)})", "info")
         
-        self.log(f"Patching details: {json_file}", "info") if result_summary['parameters']['output_file'] else None
+        # Show attempt history
+        if 'attempt_history' in result_summary and result_summary['attempt_history']:
+            self.log("\nAttempt history:", "info")
+            for attempt in result_summary['attempt_history']:
+                self.log(f"  ✗ Attempt {attempt['attempt']}: {attempt['error']}", "info")
+        
+        if 'successful_attempt' in result_summary:
+            self.log(f"\n✓ Successful on attempt #{result_summary['successful_attempt']}", "info")
     
     def _cleanup_temp_files(self):
         """Clean up temporary files"""
@@ -1078,11 +1167,11 @@ def patch_genome_gap(
 def main():
     """Command line interface main function"""
     parser = argparse.ArgumentParser(
-        description='minimap2-based genome gap patching tool (Unified API Version)',
+        description='minimap2-based genome gap patching tool (Multi-patch attempt version)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage examples:
-  # Basic usage
+  # Basic usage - will try all patches for the gap position until success
   python patch_gap.py -r chromosome.fasta -p patches.fasta --gap-position 11533087
   
   # Specify chromosome and multiple parameters
@@ -1105,7 +1194,7 @@ Usage examples:
     parser.add_argument("-r", "--reference", dest="reference_fasta", required=True,
                        help="Target chromosome/genome FASTA file")
     parser.add_argument("-p", "--patch", dest="patch_fasta", required=True,
-                       help="Patch sequence FASTA file")
+                       help="Patch sequence FASTA file (can contain multiple patches for same gap)")
     parser.add_argument("--gap-position", type=int, required=True,
                        help="Gap position coordinate")
     

@@ -17,7 +17,7 @@ class GapFillerAPI:
     def __init__(self, verbose: bool = True, log_file: Optional[str] = None):
         self.verbose = verbose
         self.log_file = log_file
-        self.temp_dirs = []
+        self.temp_dirs =[]
         self._setup_logging()
     
     def _setup_logging(self):
@@ -56,7 +56,7 @@ class GapFillerAPI:
         min_contig_length: int = 1000
     ) -> List[str]:
         self.log(f"Starting contig file preprocessing, splitting contigs with {min_gap_length}N or longer gaps", "info")
-        processed_files = []
+        processed_files =[]
         os.makedirs(output_dir, exist_ok=True)
         
         for i, input_file in enumerate(input_files):
@@ -145,9 +145,9 @@ class GapFillerAPI:
         
         draft_fasta = os.path.abspath(draft_fasta)
         if isinstance(reads_fasta, str):
-            reads_files = [os.path.abspath(reads_fasta)]
+            reads_files =[os.path.abspath(reads_fasta)]
         else:
-            reads_files = [os.path.abspath(f) for f in reads_fasta]
+            reads_files =[os.path.abspath(f) for f in reads_fasta]
         
         if not os.path.exists(draft_fasta):
             raise FileNotFoundError(f"Genome file not found: {draft_fasta}")
@@ -163,7 +163,7 @@ class GapFillerAPI:
             if preprocess_contigs:
                 self.log(f"Preprocessing contigs: splitting contigs with {min_gap_length}N or longer gaps", "info")
                 
-                processed_reads_files = []
+                processed_reads_files =[]
                 for i, read_file in enumerate(reads_files):
                     self.log(f"Processing file {i+1}/{len(reads_files)}: {read_file}", "info")
                     
@@ -217,7 +217,7 @@ class GapFillerAPI:
                 reads_files = processed_reads_files
                 self.log(f"Preprocessing completed, using {len(reads_files)} files", "info")
             else:
-                temp_reads_files = []
+                temp_reads_files =[]
                 for i, read_file in enumerate(reads_files):
                     temp_file = f"input_{i}.fa"
                     shutil.copy2(read_file, temp_file)
@@ -231,7 +231,7 @@ class GapFillerAPI:
             
             draft_fasta_local = draft_basename
             
-            cmd = [
+            cmd =[
                 "tgsgapcloser",
                 "--scaff", draft_fasta_local,
                 "--reads", ",".join(reads_files),
@@ -269,7 +269,7 @@ class GapFillerAPI:
                 
                 tgs_output_file = "tgs_filled.scaff_seqs"
                 if not os.path.exists(tgs_output_file):
-                    possible_files = [
+                    possible_files =[
                         "tgs_filled.fa",
                         "tgs_filled.fasta",
                         "tgs_filled.scaffold.fa",
@@ -325,14 +325,14 @@ class GapFillerAPI:
             gap_count = 0
             with open(fasta_file, 'r') as f:
                 seq_id = ""
-                current_seq = []
+                current_seq =[]
                 for line in f:
                     if line.startswith('>'):
                         if seq_id and current_seq:
                             seq = ''.join(current_seq)
                             gap_count += len(re.findall(r'N{100,}', seq))
                         seq_id = line[1:].strip().split()[0]
-                        current_seq = []
+                        current_seq =[]
                     else:
                         current_seq.append(line.strip())
                 
@@ -356,7 +356,7 @@ class GapFillerAPI:
         gap_patches: Union[str, List[str]],
         output_dir: str = ".",
         output_prefix: str = "gap_filled",
-        flank_size: int = 5000,
+        flank_size: int = 10000,
         min_alignment_length: int = 1000,
         min_identity: float = 40.0,
         max_fill_length: int = 1000000,
@@ -486,7 +486,7 @@ class GapFillerAPI:
             raise
     
     def _generate_combined_report(self, flank_result: Dict, tgs_result: Optional[Dict]) -> str:
-        report_lines = []
+        report_lines =[]
         report_lines.append("=" * 80)
         report_lines.append("             Two-Stage Gap Filling Comprehensive Report")
         report_lines.append("=" * 80)
@@ -640,7 +640,7 @@ def _prepare_temp_directory(prefix, overwrite, output_dir=None):
     return tmp_dir
 
 def _check_prerequisite(prerequisitelist: list):
-    prerequisitenotfound = []
+    prerequisitenotfound =[]
     for prerequisite in prerequisitelist:
         cmd = subprocess.run(f'which {prerequisite}', stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
         if cmd.stdout == b'':
@@ -654,7 +654,7 @@ def _check_prerequisite(prerequisitelist: list):
 def gap_filler(
     draft_genome: str,
     gapcloser_contig: list,
-    flanking_len: int = 5000,
+    flanking_len: int = 10000,
     min_alignment_length: int = 1000,
     min_alignment_identity: float = 40.0,
     max_filling_len: int = 1000000,
@@ -678,7 +678,7 @@ def gap_filler(
     tmp_dir = _prepare_temp_directory(prefix, overwrite, output_dir)
     
     draftgenomefile = _decompress(draft_genome)
-    gapclosercontigfilelist = [_decompress(f) for f in gapcloser_contig]
+    gapclosercontigfilelist =[_decompress(f) for f in gapcloser_contig]
     flanking = flanking_len
     minalignmentlength2 = min_alignment_length
     minalignmentidentity2 = min_alignment_identity / 100.0
@@ -708,7 +708,7 @@ def gap_filler(
     for sid, seq in draftgenomedict.items():
         if 'N' * 100 in seq:
             i = 1
-            gapsitelist = [r.span() for r in re.finditer(r'N{100,}', seq)]
+            gapsitelist =[r.span() for r in re.finditer(r'N{100,}', seq)]
             for start_n, end_n in gapsitelist:
                 start = max(start_n - flanking, 0)
                 end = min(end_n + flanking, len(seq))
@@ -771,7 +771,7 @@ def gap_filler(
         
         print(f'[Info] Alignment results saved to: {paf_file}')
         
-        allalignment = []
+        allalignment =[]
         with open(paf_file) as paf:
             for line in paf:
                 fields = line.strip().split()
@@ -806,8 +806,8 @@ def gap_filler(
         
         print(f'[Info] Analyzing alignments for {gapfiller}...')
         for gapid in gapdict:
-            Leftanchor = [a for a in allalignment if a['gapid'] == gapid and a['LR'] == 'L']
-            Rightanchor = [a for a in allalignment if a['gapid'] == gapid and a['LR'] == 'R']
+            Leftanchor =[a for a in allalignment if a['gapid'] == gapid and a['LR'] == 'L']
+            Rightanchor =[a for a in allalignment if a['gapid'] == gapid and a['LR'] == 'R']
             if not Leftanchor or not Rightanchor:
                 continue
             
@@ -829,6 +829,10 @@ def gap_filler(
                         if score <= best_score:
                             continue
                         
+                        # 计算草图基因组中需要被切除（Trim）的不可靠侧翼长度
+                        trim_left = Laln['qrylen'] - Laln['qryend']
+                        trim_right = Raln['qrystart'] - 1
+                        
                         fill_start = L['refend'] + 1
                         fill_end = R['refstart'] - 1
                         if fill_start > fill_end:
@@ -847,7 +851,9 @@ def gap_filler(
                             'range': f'{fill_start}-{fill_end}',
                             'seq': fill_seq,
                             'strand': current_strand,
-                            'score': score
+                            'score': score,
+                            'trim_left': trim_left,
+                            'trim_right': trim_right
                         }
                         best_score = score
     
@@ -892,6 +898,7 @@ def gap_filler(
     filledfastafile = os.path.join(output_dir, f'{prefix}.genome.filled.fasta')
     filledragpfile = os.path.join(output_dir, f'{prefix}.genome.filled.modified.agp')
     draftgenomedict = _read_fasta_dict(draftgenomefile)
+    
     with open(filledfastafile, 'w') as w, open(filledragpfile, 'w') as ragp:
         for sid, seq in draftgenomedict.items():
             if 'N' * 100 not in seq:
@@ -900,34 +907,62 @@ def gap_filler(
                 continue
             
             matches = list(re.finditer(r'N{100,}', seq))
-            parts = []
+            parts =[]
             last_end = 0
             agp_idx = 1
+            agp_seq_start = 1
             
-            for match in matches:
-                if match.start() > last_end:
-                    subseq = seq[last_end:match.start()]
-                    parts.append(subseq)
-                    ragp.write(f'{sid}\t{last_end+1}\t{match.start()}\t{agp_idx}\tW\t{sid}\t{last_end+1}\t{match.start()}\t+\n')
-                    agp_idx += 1
-                gapid = f'{sid}.{len(parts)//2 + 1}'
+            for match_idx, match in enumerate(matches, 1):
+                gapid = f'{sid}.{match_idx}'
+                gap_start_n = match.start()
+                gap_end_n = match.end()
+                
                 if gapid in gapcloserdict:
                     fill_info = gapcloserdict[gapid]
                     fill_seq = fill_info['seq']
-                    parts.append(fill_seq)
-                    ragp.write(f'{sid}\t{match.start()+1}\t{match.start()+len(fill_seq)}\t{agp_idx}\tW\t{fill_info["sid"]}\t{fill_info["range"].split("-")[0]}\t{fill_info["range"].split("-")[1]}\t{fill_info["strand"]}\n')
-                    agp_idx += 1
+                    trim_left = fill_info.get('trim_left', 0)
+                    trim_right = fill_info.get('trim_right', 0)
+                    
+                    draft_end = gap_start_n - trim_left
+                    draft_end = max(last_end, draft_end)
+                    
+                    if draft_end > last_end:
+                        subseq = seq[last_end:draft_end]
+                        parts.append(subseq)
+                        ragp.write(f'{sid}\t{agp_seq_start}\t{agp_seq_start + len(subseq) - 1}\t{agp_idx}\tW\t{sid}\t{last_end+1}\t{draft_end}\t+\n')
+                        agp_seq_start += len(subseq)
+                        agp_idx += 1
+                        
+                    if fill_seq:
+                        parts.append(fill_seq)
+                        filler_id = fill_info["sid"].split("@")[1]
+                        filler_start_coord = fill_info["range"].split("-")[0]
+                        filler_end_coord = fill_info["range"].split("-")[1]
+                        ragp.write(f'{sid}\t{agp_seq_start}\t{agp_seq_start + len(fill_seq) - 1}\t{agp_idx}\tW\t{filler_id}\t{filler_start_coord}\t{filler_end_coord}\t{fill_info["strand"]}\n')
+                        agp_seq_start += len(fill_seq)
+                        agp_idx += 1
+                    
+                    last_end = gap_end_n + trim_right
                 else:
-                    gap_seq = seq[match.start():match.end()]
+                    if gap_start_n > last_end:
+                        subseq = seq[last_end:gap_start_n]
+                        parts.append(subseq)
+                        ragp.write(f'{sid}\t{agp_seq_start}\t{agp_seq_start + len(subseq) - 1}\t{agp_idx}\tW\t{sid}\t{last_end+1}\t{gap_start_n}\t+\n')
+                        agp_seq_start += len(subseq)
+                        agp_idx += 1
+                        
+                    gap_seq = seq[gap_start_n:gap_end_n]
                     parts.append(gap_seq)
-                    ragp.write(f'{sid}\t{match.start()+1}\t{match.end()}\t{agp_idx}\tN\t{len(gap_seq)}\tscaffold\tyes\tunspecified\n')
+                    ragp.write(f'{sid}\t{agp_seq_start}\t{agp_seq_start + len(gap_seq) - 1}\t{agp_idx}\tN\t{len(gap_seq)}\tscaffold\tyes\tunspecified\n')
+                    agp_seq_start += len(gap_seq)
                     agp_idx += 1
-                last_end = match.end()
+                    
+                    last_end = gap_end_n
             
             if last_end < len(seq):
                 subseq = seq[last_end:]
                 parts.append(subseq)
-                ragp.write(f'{sid}\t{last_end+1}\t{len(seq)}\t{agp_idx}\tW\t{sid}\t{last_end+1}\t{len(seq)}\t+\n')
+                ragp.write(f'{sid}\t{agp_seq_start}\t{agp_seq_start + len(subseq) - 1}\t{agp_idx}\tW\t{sid}\t{last_end+1}\t{len(seq)}\t+\n')
             
             newseq = ''.join(parts)
             w.write(f'>{sid}\n{newseq}\n')
@@ -946,7 +981,7 @@ def gap_filler(
         info.write(f'# GC content: {gccontent:.6f}\n')
         info.write('# ChrID\tLength\tGapcount\tGaplocus\n')
         for sid, seq in chrfastadict.items():
-            gaps = [r.span() for r in re.finditer(r'N{100,}', seq)]
+            gaps =[r.span() for r in re.finditer(r'N{100,}', seq)]
             if gaps:
                 loci = '\t'.join(f'{s+1}-{e}' for s, e in gaps)
                 info.write(f'{sid}\t{len(seq)}\t{len(gaps)}\t{loci}\n')
@@ -1021,8 +1056,8 @@ Usage examples:
     parser.add_argument('--min-contig-length', dest='min_contig_length', type=int, default=1000,
                        help='Minimum contig length to keep after preprocessing, default: 1000')
     
-    parser.add_argument('-f', '--flank-size', dest='flanking_len', type=int, default=5000, 
-                       help='Flanking length (bp), default: 5000')
+    parser.add_argument('-f', '--flank-size', dest='flanking_len', type=int, default=10000, 
+                       help='Flanking length (bp), default: 10000')
     parser.add_argument('-l', '--min-length', dest='min_alignment_length', type=int, default=1000, 
                        help='Min alignment length (bp), default: 1000')
     parser.add_argument('-i', '--min-identity', dest='min_alignment_identity', type=float, default=40, 
@@ -1046,7 +1081,7 @@ Usage examples:
                        help='Keep temporary files for debugging.')
     parser.add_argument('--api-mode', action='store_true',
                        help='Use API mode for better error handling and logging.')
-    parser.add_argument('--version', action='version', version='GapFiller V2.3.0')
+    parser.add_argument('--version', action='version', version='GapFiller V2.4.0 (Trim-optimized)')
     
     if len(sys.argv) == 1:
         parser.print_help()
