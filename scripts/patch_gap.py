@@ -3,6 +3,8 @@
 Genome Gap Patching Tool - Unified API Version based on minimap2
 Provides consistent API design with extract_gap_patches.py
 Supports multiple patch attempts sequentially until success
+Includes content-based gap detection for verification
+MODIFIED: Success depends ONLY on whether deleted region contains Ns
 """
 
 import sys
@@ -73,6 +75,10 @@ class GenomeGapPatcherAPI:
         """Configure logging system"""
         self.logger = logging.getLogger('GenomeGapPatcher')
         self.logger.setLevel(logging.INFO if self.verbose else logging.WARNING)
+        
+        # Remove existing handlers to avoid duplicates
+        for handler in self.logger.handlers[:]:
+            self.logger.removeHandler(handler)
         
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.INFO if self.verbose else logging.WARNING)
@@ -145,6 +151,7 @@ class GenomeGapPatcherAPI:
         gap_position: int,
         output_fasta: str = "patched_genome.fasta",
         chromosome: Optional[str] = None,
+        gap_length: int = 100,
         minimap2_mode: str = 'asm5',
         min_score: float = 0.7,
         min_match_length: int = 100,
@@ -157,6 +164,7 @@ class GenomeGapPatcherAPI:
     ) -> Dict[str, Any]:
         """
         Patch gap in genome - will try multiple patches sequentially until success
+        with verification that the deleted region contains actual Ns.
         
         Args:
             reference_fasta: Target chromosome/genome FASTA file
@@ -164,6 +172,7 @@ class GenomeGapPatcherAPI:
             gap_position: Gap start coordinate
             output_fasta: Output patched FASTA file
             chromosome: Specify chromosome name (optional, if None use first sequence)
+            gap_length: Length of the gap in bp (default: 100)
             minimap2_mode: minimap2 alignment mode
             min_score: Minimum match score
             min_match_length: Minimum match length
@@ -181,6 +190,7 @@ class GenomeGapPatcherAPI:
         self.log(f"Reference genome: {reference_fasta}", "info")
         self.log(f"Patch file: {patch_fasta}", "info")
         self.log(f"Gap position: {gap_position:,}", "info")
+        self.log(f"Gap length: {gap_length} bp", "info")
         
         start_time = time.time()
         
@@ -191,6 +201,15 @@ class GenomeGapPatcherAPI:
         
         self.log("Reading chromosome sequence...", "info")
         chr_record, chr_seq = self._load_chromosome_sequence(reference_fasta, chromosome)
+        
+        # Check original gap region
+        gap_end = gap_position + gap_length
+        if gap_end <= len(chr_seq):
+            original_gap_region = chr_seq[gap_position:gap_end]
+            original_n_count = original_gap_region.count('N')
+            self.log(f"Original gap region ({gap_position:,}-{gap_end:,}): {original_n_count}/{gap_length} Ns", "info")
+            if original_n_count < gap_length:
+                self.log(f"Warning: Gap region contains only {original_n_count} Ns, expected {gap_length}", "warning")
         
         self.log("Parsing patch sequences...", "info")
         # Load all matching patches
@@ -232,41 +251,62 @@ class GenomeGapPatcherAPI:
                 )
                 
                 if result['success']:
-                    # Found matches, try to apply patch
+                    # Found matches, try to apply and verify patch
                     try:
-                        patched_seq, patch_details = patcher.apply_patch(
-                            chr_seq, gap_position, result['matches']
+                        # Use verification method
+                        patched_seq, patch_details, patch_success = patcher.apply_patch_with_verification(
+                            chr_seq, gap_position, result['matches'], gap_length
                         )
                         
-                        # Save successful result
-                        self._save_patched_sequence(chr_record.id, patched_seq, output_fasta)
-                        
-                        result_summary = self._create_result_summary(
-                            chr_seq=chr_seq,
-                            patched_seq=patched_seq,
-                            chr_record=chr_record,
-                            selected_patch=selected_patch,
-                            patch_details=patch_details,
-                            parameters=config,
-                            gap_position=gap_position,
-                            elapsed_time=time.time() - start_time
-                        )
-                        
-                        # Add attempt history
-                        result_summary['attempt_history'] = attempt_history
-                        result_summary['successful_attempt'] = attempt_num
-                        
-                        if output_json:
-                            self._save_results_to_json(result_summary, output_json)
-                            self.log(f"JSON report saved: {output_json}", "info")
-                        
-                        self._print_summary(result_summary)
-                        
-                        self._cleanup_temp_files()
-                        
-                        self.log(f"✓ Successfully patched using attempt #{attempt_num}!", "info")
-                        return result_summary
-                        
+                        if patch_success:
+                            # Verification passed, save results
+                            self._save_patched_sequence(chr_record.id, patched_seq, output_fasta)
+                            
+                            result_summary = self._create_result_summary(
+                                chr_seq=chr_seq,
+                                patched_seq=patched_seq,
+                                chr_record=chr_record,
+                                selected_patch=selected_patch,
+                                patch_details=patch_details,
+                                parameters=config,
+                                gap_position=gap_position,
+                                elapsed_time=time.time() - start_time
+                            )
+                            
+                            # Add verification info
+                            result_summary['verification'] = patch_details.get('verification', {})
+                            result_summary['attempt_history'] = attempt_history
+                            result_summary['successful_attempt'] = attempt_num
+                            
+                            if output_json:
+                                self._save_results_to_json(result_summary, output_json)
+                                self.log(f"JSON report saved: {output_json}", "info")
+                            
+                            self._print_summary(result_summary)
+                            
+                            self._cleanup_temp_files()
+                            
+                            self.log(f"✓ Successfully patched and verified using attempt #{attempt_num}!", "info")
+                            return result_summary
+                        else:
+                            # Verification failed, try next patch
+                            error_msg = patch_details.get('error', 'Verification failed: deleted region does not contain gap')
+                            self.log(error_msg, "warning")
+                            
+                            # Print verification details for debugging
+                            if 'verification' in patch_details:
+                                self._print_verification_details(patch_details['verification'])
+                            
+                            attempt_history.append({
+                                'attempt': attempt_num,
+                                'patch_header': selected_patch['header'],
+                                'success': False,
+                                'error': error_msg,
+                                'verification': patch_details.get('verification', {})
+                            })
+                            last_error = error_msg
+                            continue  # Try next patch
+                            
                     except Exception as e:
                         error_msg = f"Failed to apply patch: {e}"
                         self.log(error_msg, "warning")
@@ -311,6 +351,7 @@ class GenomeGapPatcherAPI:
             failure_summary = {
                 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'gap_position': gap_position,
+                'gap_length': gap_length,
                 'reference': reference_fasta,
                 'patch_file': patch_fasta,
                 'total_patches': len(all_patches),
@@ -322,6 +363,32 @@ class GenomeGapPatcherAPI:
             self.log(f"Failure report saved: {output_json}", "info")
         
         raise RuntimeError(error_msg)
+    
+    def _print_verification_details(self, verification: Dict):
+        """Print detailed verification information"""
+        self.log("\n" + "="*60, "info")
+        self.log("GAP Verification Details:", "info")
+        self.log("="*60, "info")
+        
+        deleted = verification.get('deleted_region', {})
+        self.log(f"Deleted region: {deleted.get('start', 0):,}-{deleted.get('end', 0):,} "
+                f"(length: {deleted.get('length', 0):,} bp)", "info")
+        
+        gap_info = verification.get('gap_info', {})
+        self.log(f"Expected GAP: {gap_info.get('expected_start', 0):,}-{gap_info.get('expected_end', 0):,} "
+                f"(length: {gap_info.get('length', 0)} bp)", "info")
+        
+        if verification.get('deletion_contains_gap', False):
+            self.log("✓ Deleted region contains GAP(s)!", "info")
+            for i, gap in enumerate(verification.get('deletion_gap_details', {}).get('gap_positions', [])[:3]):
+                self.log(f"  GAP {i+1}: {gap['start']:,}-{gap['end']:,} (length: {gap['length']} bp)", "info")
+        else:
+            self.log("✗ Deleted region does NOT contain GAP", "warning")
+            n_count = verification.get('deletion_gap_details', {}).get('total_n_count', 0)
+            self.log(f"  Total Ns in deleted region: {n_count}", "warning")
+            self.log(f"  Overlap with expected GAP: {verification.get('overlap', {}).get('percentage', 0):.1f}%", "warning")
+        
+        self.log("="*60, "info")
     
     def _check_dependencies(self):
         """Check required dependencies"""
@@ -375,7 +442,9 @@ class GenomeGapPatcherAPI:
             'gap_position': 0,
             'gap_length': 0,
             'chromosome': 'unknown',
-            'source': 'unknown'
+            'source': 'unknown',
+            'is_contig': False,
+            'contig_length': 0
         }
         
         if 'gap' in header.lower():
@@ -390,6 +459,13 @@ class GenomeGapPatcherAPI:
             chr_match = re.search(r'chr(?:omosome)?[_-]?([\w\.]+)', header, re.IGNORECASE)
             if chr_match:
                 info['chromosome'] = chr_match.group(1)
+        
+        # Check for contig information
+        if 'contig' in header.lower():
+            info['is_contig'] = True
+            len_match = re.search(r'length[=_:](\d+)', header, re.IGNORECASE)
+            if len_match:
+                info['contig_length'] = int(len_match.group(1))
         
         return info
     
@@ -442,7 +518,6 @@ class GenomeGapPatcherAPI:
                 'description': chr_record.description,
                 'original_length': len(chr_seq)
             },
-            # These will be filled later
             'attempt_history': [],
             'successful_attempt': None
         }
@@ -481,11 +556,20 @@ class GenomeGapPatcherAPI:
             self.log(f"Right flank match score: {match_quality.get('right_score', 0):.3f} "
                   f"(MAPQ: {match_quality.get('right_mapq', 0)})", "info")
         
+        # Show verification info
+        verification = patch_details.get('verification', {})
+        if verification:
+            self.log("\nVerification:", "info")
+            if verification.get('deletion_contains_gap', False):
+                self.log("  ✓ Deleted region contained GAP(s)", "info")
+            else:
+                self.log("  ⚠ Warning: Deleted region did not contain GAP", "warning")
+        
         # Show attempt history
         if 'attempt_history' in result_summary and result_summary['attempt_history']:
             self.log("\nAttempt history:", "info")
             for attempt in result_summary['attempt_history']:
-                self.log(f"  ✗ Attempt {attempt['attempt']}: {attempt['error']}", "info")
+                self.log(f"  ✗ Attempt {attempt['attempt']}: {attempt.get('error', 'Unknown error')}", "info")
         
         if 'successful_attempt' in result_summary:
             self.log(f"\n✓ Successful on attempt #{result_summary['successful_attempt']}", "info")
@@ -501,86 +585,6 @@ class GenomeGapPatcherAPI:
                     self.log(f"Failed to clean temporary file {temp_file}: {e}", "warning")
         self.temp_files.clear()
     
-    def batch_patch(
-        self,
-        reference_fasta: str,
-        patch_fastas: List[str],
-        gap_positions: List[int],
-        output_dir: str = ".",
-        batch_prefix: str = "batch",
-        **kwargs
-    ) -> Dict[str, Any]:
-        """
-        Batch patch multiple gaps
-        
-        Args:
-            reference_fasta: Reference genome file
-            patch_fastas: List of patch files
-            gap_positions: List of gap positions
-            output_dir: Output directory
-            batch_prefix: Batch processing prefix
-            **kwargs: Other parameters passed to patch_gap
-            
-        Returns:
-            Batch processing summary
-        """
-        if len(patch_fastas) != len(gap_positions):
-            raise ValueError("Patch file list and gap position list must have same length")
-        
-        self.log(f"Starting batch patching for {len(gap_positions)} gaps", "info")
-        
-        results = {}
-        for i, (patch_fasta, gap_pos) in enumerate(zip(patch_fastas, gap_positions)):
-            self.log(f"Processing gap {i+1}/{len(gap_positions)}: position {gap_pos:,}", "info")
-            
-            output_file = os.path.join(output_dir, f"{batch_prefix}_{i+1:03d}_patched.fasta")
-            output_json = os.path.join(output_dir, f"{batch_prefix}_{i+1:03d}_report.json")
-            
-            try:
-                result = self.patch_gap(
-                    reference_fasta=reference_fasta,
-                    patch_fasta=patch_fasta,
-                    gap_position=gap_pos,
-                    output_fasta=output_file,
-                    output_json=output_json,
-                    **kwargs
-                )
-                results[f"gap_{gap_pos}"] = {
-                    "success": True,
-                    "result": result,
-                    "output_files": {
-                        "patched_fasta": output_file,
-                        "json_report": output_json
-                    }
-                }
-            except Exception as e:
-                results[f"gap_{gap_pos}"] = {
-                    "success": False,
-                    "error": str(e),
-                    "output_files": {
-                        "patched_fasta": output_file,
-                        "json_report": output_json
-                    }
-                }
-                self.log(f"Patching failed: {e}", "warning")
-        
-        summary = {
-            "total": len(gap_positions),
-            "successful": sum(1 for r in results.values() if r["success"]),
-            "failed": sum(1 for r in results.values() if not r["success"]),
-            "results": results,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        summary_file = os.path.join(output_dir, f"{batch_prefix}_summary.json")
-        with open(summary_file, "w") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-        
-        self.log(f"Batch patching completed, successful: {summary['successful']}/{summary['total']}", "info")
-        self.log(f"Summary report saved: {summary_file}", "info")
-        
-        return summary
-    
     def cleanup(self):
         """Clean up all temporary files"""
         self._cleanup_temp_files()
@@ -588,6 +592,7 @@ class GenomeGapPatcherAPI:
     def __del__(self):
         """Destructor, automatically clean temporary files"""
         self.cleanup()
+
 
 class Minimap2Matcher:
     """minimap2 aligner wrapper"""
@@ -829,8 +834,9 @@ class Minimap2Matcher:
             self.stats['failed_matches'] += 1
             return None
 
+
 class Minimap2GapPatcher:
-    """minimap2-based gap patcher"""
+    """minimap2-based gap patcher with content-based verification"""
     
     def __init__(self, config: Optional[Dict] = None, logger: Optional[logging.Logger] = None):
         default_config = {
@@ -858,9 +864,20 @@ class Minimap2GapPatcher:
         )
     
     def extract_flanks(self, patch_seq: str) -> Tuple[str, str, str, Dict]:
-        """Extract flank and core sequences"""
+        """Extract flank and core sequences with dynamic sizing for long patches"""
         patch_len = len(patch_seq)
-        flank_size = self.config['flank_size']
+        
+        # Dynamic flank sizing for long patches
+        if patch_len > 1000000:  # > 1Mb
+            # Use 5% of patch length, but cap at 200kb
+            flank_size = min(int(patch_len * 0.05), 200000)
+        else:
+            flank_size = self.config['flank_size']
+        
+        # Ensure minimum flank size
+        flank_size = max(flank_size, 5000)
+        
+        self.logger.info(f"Using flank size: {flank_size:,}bp (patch length: {patch_len:,}bp)")
         
         if patch_len <= 2 * flank_size:
             flank_size = patch_len // 4
@@ -877,10 +894,148 @@ class Minimap2GapPatcher:
             'left_size': flank_size,
             'right_size': flank_size,
             'core_size': len(core_patch),
-            'full_patch_length': patch_len
+            'full_patch_length': patch_len,
+            'dynamic_flank': patch_len > 1000000
         }
         
         return left_flank, core_patch, right_flank, flank_info
+    
+    def detect_gap_in_region(self, sequence: str, start: int, end: int, 
+                            min_gap_length: int = 10) -> Dict[str, Any]:
+        """
+        Detect if a region contains gaps (consecutive Ns)
+        
+        Args:
+            sequence: Genome sequence
+            start: Region start position
+            end: Region end position
+            min_gap_length: Minimum consecutive Ns to consider a gap
+            
+        Returns:
+            Detection results
+        """
+        if start < 0 or end > len(sequence) or start >= end:
+            return {
+                'has_gap': False,
+                'gap_positions': [],
+                'total_n_count': 0,
+                'region_length': end - start,
+                'error': 'Invalid region'
+            }
+        
+        region = sequence[start:end]
+        total_n_count = region.count('N')
+        
+        # Find consecutive N regions
+        import re
+        gap_pattern = re.compile(r'N{' + str(min_gap_length) + ',}')
+        gaps = []
+        
+        for match in gap_pattern.finditer(region):
+            gap_start = start + match.start()
+            gap_end = start + match.end()
+            gap_length = match.end() - match.start()
+            gaps.append({
+                'start': gap_start,
+                'end': gap_end,
+                'length': gap_length,
+                'sequence': match.group()[:50] + '...' if gap_length > 50 else match.group()
+            })
+        
+        result = {
+            'has_gap': len(gaps) > 0,
+            'gap_positions': gaps,
+            'total_n_count': total_n_count,
+            'region_length': end - start,
+            'n_percentage': (total_n_count / (end - start)) * 100 if end > start else 0
+        }
+        
+        if result['has_gap']:
+            self.logger.info(f"Found {len(gaps)} gap(s) in region {start:,}-{end:,}")
+            for i, gap in enumerate(gaps[:3]):  # Show first 3 only
+                self.logger.info(f"  Gap {i+1}: {gap['start']:,}-{gap['end']:,} (length: {gap['length']} bp)")
+        
+        return result
+    
+    def verify_patch_correctness(self, genome_seq: str, left_cut: int, 
+                                right_cut: int, gap_start: int, 
+                                gap_length: int = 100) -> Dict[str, Any]:
+        """
+        Verify patch correctness by checking if deleted region contains actual gaps
+        
+        MODIFIED: Success depends ONLY on whether deleted region contains Ns,
+        regardless of length change or overlap percentage.
+        
+        Args:
+            genome_seq: Genome sequence
+            left_cut: Left cut position
+            right_cut: Right cut position
+            gap_start: Expected gap start position
+            gap_length: Expected gap length
+            
+        Returns:
+            Verification results
+        """
+        # Check deleted region
+        deleted_region_start = left_cut
+        deleted_region_end = right_cut
+        
+        self.logger.info(f"\n[Patch Verification]")
+        self.logger.info(f"Deleted region: {deleted_region_start:,}-{deleted_region_end:,}")
+        self.logger.info(f"Expected gap: {gap_start:,}-{gap_start + gap_length:,}")
+        
+        # Detect gaps in deleted region
+        deletion_check = self.detect_gap_in_region(
+            genome_seq, 
+            deleted_region_start, 
+            deleted_region_end
+        )
+        
+        # Calculate overlap with expected gap (for information only, not used for success)
+        overlap_start = max(deleted_region_start, gap_start)
+        overlap_end = min(deleted_region_end, gap_start + gap_length)
+        overlap_length = max(0, overlap_end - overlap_start)
+        overlap_percentage = (overlap_length / gap_length) * 100 if gap_length > 0 else 0
+        
+        result = {
+            'success': False,
+            'deleted_region': {
+                'start': deleted_region_start,
+                'end': deleted_region_end,
+                'length': deleted_region_end - deleted_region_start
+            },
+            'gap_info': {
+                'expected_start': gap_start,
+                'expected_end': gap_start + gap_length,
+                'length': gap_length
+            },
+            'overlap': {
+                'start': overlap_start if overlap_length > 0 else None,
+                'end': overlap_end if overlap_length > 0 else None,
+                'length': overlap_length,
+                'percentage': overlap_percentage
+            },
+            'deletion_contains_gap': deletion_check['has_gap'],
+            'deletion_gap_details': deletion_check
+        }
+        
+        # MODIFIED: Success criteria - ONLY check if deleted region contains actual gaps
+        # Removed length change and overlap percentage requirements
+        if deletion_check['has_gap']:
+            result['success'] = True
+            result['reason'] = f"Deleted region contains {len(deletion_check['gap_positions'])} gap(s)"
+            self.logger.info(f"✓ Verification passed: Deleted region contains actual gap(s)")
+        else:
+            result['success'] = False
+            result['reason'] = f"Deleted region contains no gaps"
+            self.logger.warning(f"✗ Verification failed: {result['reason']}")
+            
+            if deletion_check['total_n_count'] > 0:
+                self.logger.warning(f"  Deleted region has {deletion_check['total_n_count']} Ns but not consecutive")
+            else:
+                self.logger.warning(f"  Deleted region has no Ns at all")
+        
+        return result
     
     def find_matching_regions(self, gap_start: int, patch_seq: str, 
                             genome_seq: str) -> Dict:
@@ -1020,6 +1175,7 @@ class Minimap2GapPatcher:
         left_is_reverse = left_match.metadata.get('strand') == '-'
         right_is_reverse = right_match.metadata.get('strand') == '-'
         
+        # Handle reverse strand matches
         if left_is_reverse or right_is_reverse:
             self.logger.warning("Reverse strand match detected, needs special handling")
             if left_is_reverse and right_is_reverse:
@@ -1027,6 +1183,7 @@ class Minimap2GapPatcher:
                 complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'N': 'N'}
                 full_patch = ''.join(complement.get(base, base) for base in reversed(full_patch))
         
+        # Determine cut points
         left_cut = left_genome_end
         right_cut = right_genome_start
         
@@ -1045,10 +1202,12 @@ class Minimap2GapPatcher:
                 left_cut = min(left_cut, gap_start)
                 right_cut = max(right_cut, gap_start + 100)
         
+        # Ensure cut points are within bounds
         genome_len = len(genome_seq)
         left_cut = max(0, min(left_cut, gap_start + self.config['search_range']))
         right_cut = max(gap_start - self.config['search_range'], min(right_cut, genome_len))
         
+        # Determine patch insertion region
         left_patch_start = left_match.flank_start_offset
         left_patch_end = left_match.flank_end_offset
         
@@ -1131,12 +1290,55 @@ class Minimap2GapPatcher:
         }
         
         return patched_seq, patch_info
+    
+    def apply_patch_with_verification(self, genome_seq: str, gap_start: int,
+                                    match_results: Dict, gap_length: int = 100) -> Tuple[str, Dict, bool]:
+        """
+        Apply patch and verify that the deleted region contains actual gaps
+        
+        Returns:
+            (patched_seq, patch_info, success)
+        """
+        # First, get cut points without applying
+        left_match = match_results['left']['match']
+        right_match = match_results['right']['match']
+        
+        left_genome_end = left_match.genome_match_end
+        right_genome_start = right_match.genome_match_start
+        
+        left_cut = left_genome_end
+        right_cut = right_genome_start
+        
+        # Verify that the region to be deleted contains gaps
+        verification = self.verify_patch_correctness(
+            genome_seq, left_cut, right_cut, gap_start, gap_length
+        )
+        
+        if not verification['success']:
+            # Verification failed, don't apply patch
+            self.logger.warning("Skipping this patch: deleted region does not contain actual gaps")
+            return "", {
+                'error': 'Verification failed: deleted region does not contain gap',
+                'verification': verification,
+                'skipped': True
+            }, False
+        
+        # Verification passed, apply patch
+        self.logger.info("Verification passed, applying patch...")
+        patched_seq, patch_info = self.apply_patch(genome_seq, gap_start, match_results)
+        
+        # Add verification info
+        patch_info['verification'] = verification
+        
+        return patched_seq, patch_info, True
+
 
 def patch_genome_gap(
     reference_fasta: str,
     patch_fasta: str,
     gap_position: int,
     output_fasta: str = "patched_genome.fasta",
+    gap_length: int = 100,
     verbose: bool = True,
     **kwargs
 ) -> Dict[str, Any]:
@@ -1149,6 +1351,7 @@ def patch_genome_gap(
         ...     reference_fasta="chromosome.fasta",
         ...     patch_fasta="patches.fasta",
         ...     gap_position=11533087,
+        ...     gap_length=100,
         ...     output_fasta="patched.fasta",
         ...     minimap2_mode="asm10",
         ...     flank_size=5000,
@@ -1161,21 +1364,24 @@ def patch_genome_gap(
         patch_fasta=patch_fasta,
         gap_position=gap_position,
         output_fasta=output_fasta,
+        gap_length=gap_length,
         **kwargs
     )
+
 
 def main():
     """Command line interface main function"""
     parser = argparse.ArgumentParser(
-        description='minimap2-based genome gap patching tool (Multi-patch attempt version)',
+        description='minimap2-based genome gap patching tool with content-based verification',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Usage examples:
   # Basic usage - will try all patches for the gap position until success
   python patch_gap.py -r chromosome.fasta -p patches.fasta --gap-position 11533087
   
-  # Specify chromosome and multiple parameters
-  python patch_gap.py -r genome.fasta -p patches.fasta --gap-position 11533087 --chromosome Chr1 --minimap2-mode asm10 --flank-size 5000
+  # Specify gap length and other parameters
+  python patch_gap.py -r genome.fasta -p patches.fasta --gap-position 4839969 --gap-length 100 \\
+      --chromosome Chr1 --minimap2-mode asm10 --flank-size 5000 --verbose
   
   # Python module call
   from patch_gap import GenomeGapPatcherAPI
@@ -1184,6 +1390,7 @@ Usage examples:
       reference_fasta="chromosome.fasta",
       patch_fasta="patches.fasta",
       gap_position=11533087,
+      gap_length=100,
       output_fasta="patched.fasta",
       minimap2_mode="asm5",
       flank_size=10000
@@ -1197,6 +1404,8 @@ Usage examples:
                        help="Patch sequence FASTA file (can contain multiple patches for same gap)")
     parser.add_argument("--gap-position", type=int, required=True,
                        help="Gap position coordinate")
+    parser.add_argument("--gap-length", type=int, default=100,
+                       help="Gap length in bp (default: 100)")
     
     parser.add_argument("-o", "--output", default="patched_genome.fasta",
                        help="Output FASTA file, default: patched_genome.fasta")
@@ -1250,6 +1459,7 @@ Usage examples:
             reference_fasta=args.reference_fasta,
             patch_fasta=args.patch_fasta,
             gap_position=args.gap_position,
+            gap_length=args.gap_length,
             output_fasta=output_file,
             chromosome=args.chromosome,
             minimap2_mode=args.minimap2_mode,
@@ -1271,6 +1481,7 @@ Usage examples:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

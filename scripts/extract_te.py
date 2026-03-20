@@ -290,8 +290,8 @@ def find_first_alignment_with_preceding_sequence(
     contig_structure: Dict,
     min_repeats: int = 20,
     min_telomere_length: int = 500,
-    threshold: float = 95.0, 
-    min_length: int = 100,
+    threshold: float = 99.0,
+    min_length: int = 15000,
     max_extraction_length: int = 50000
 ) -> List[Dict]:
     regions_to_extract = []
@@ -312,45 +312,48 @@ def find_first_alignment_with_preceding_sequence(
                 first_good_alignment = align
                 break
         
-        if first_good_alignment:
-            contig_id = first_good_alignment['ref_name']
-            if contig_id not in contig_structure:
-                continue
-                
-            contig_len = contig_structure[contig_id]['sequence_length']
-            contig_telomeres = contig_structure[contig_id]['telomeres']
+        # 🚨 FIX: Skip if no good alignment found
+        if first_good_alignment is None:
+            continue
             
-            extract_start = 1
-            extract_end = first_good_alignment['e1']
+        contig_id = first_good_alignment['ref_name']
+        if contig_id not in contig_structure:
+            continue
             
-            telomeres_in_region = []
-            for telomere in contig_telomeres:
-                if telomere['start'] >= extract_start and telomere['end'] <= extract_end:
-                    telomeres_in_region.append(telomere)
-            
-            has_telomere_in_region = len(telomeres_in_region) > 0
-            
-            region = {
-                'ref_name': ref_name,
-                'query_name': query_name,
-                'contig_id': contig_id,
-                'alignment_start': first_good_alignment['s1'],
-                'alignment_end': first_good_alignment['e1'],
-                'extract_start': extract_start,
-                'extract_end': extract_end,
-                'type': 'first_alignment_with_preceding',
-                'alignment_info': first_good_alignment,
-                'alignment_length': first_good_alignment['len1'],
-                'identity': first_good_alignment['identity'],
-                'contig_length': contig_len,
-                'telomeres_in_region': telomeres_in_region,
-                'has_telomere_in_region': has_telomere_in_region,
-                'extracted_region_length': extract_end - extract_start + 1,
-                'is_reverse': first_good_alignment['is_reverse'],
-                'direction_info': direction_info,
-                'max_extraction_length': max_extraction_length
-            }
-            regions_to_extract.append(region)
+        contig_len = contig_structure[contig_id]['sequence_length']
+        contig_telomeres = contig_structure[contig_id]['telomeres']
+        
+        extract_start = 1
+        extract_end = first_good_alignment['e1']
+        
+        telomeres_in_region = []
+        for telomere in contig_telomeres:
+            if telomere['start'] >= extract_start and telomere['end'] <= extract_end:
+                telomeres_in_region.append(telomere)
+        
+        has_telomere_in_region = len(telomeres_in_region) > 0
+        
+        region = {
+            'ref_name': ref_name,
+            'query_name': query_name,
+            'contig_id': contig_id,
+            'alignment_start': first_good_alignment['s1'],
+            'alignment_end': first_good_alignment['e1'],
+            'extract_start': extract_start,
+            'extract_end': extract_end,
+            'type': 'first_alignment_with_preceding',
+            'alignment_info': first_good_alignment,
+            'alignment_length': first_good_alignment['len1'],
+            'identity': first_good_alignment['identity'],
+            'contig_length': contig_len,
+            'telomeres_in_region': telomeres_in_region,
+            'has_telomere_in_region': has_telomere_in_region,
+            'extracted_region_length': extract_end - extract_start + 1,
+            'is_reverse': first_good_alignment['is_reverse'],
+            'direction_info': direction_info,
+            'max_extraction_length': max_extraction_length
+        }
+        regions_to_extract.append(region)
     
     return regions_to_extract
 
@@ -359,8 +362,8 @@ def find_last_alignment_with_subsequent_sequence(
     contig_structure: Dict,
     min_repeats: int = 20,
     min_telomere_length: int = 500,
-    threshold: float = 95.0, 
-    min_length: int = 100,
+    threshold: float = 99.0,
+    min_length: int = 15000,
     max_extraction_length: int = 50000
 ) -> List[Dict]:
     regions_to_extract = []
@@ -381,45 +384,48 @@ def find_last_alignment_with_subsequent_sequence(
                 last_good_alignment = align
                 break
         
-        if last_good_alignment:
-            contig_id = last_good_alignment['ref_name']
-            if contig_id not in contig_structure:
-                continue
-                
-            contig_len = contig_structure[contig_id]['sequence_length']
-            contig_telomeres = contig_structure[contig_id]['telomeres']
+        # 🚨 FIX: Skip if no good alignment found
+        if last_good_alignment is None:
+            continue
             
-            extract_start = last_good_alignment['s1']
-            extract_end = contig_len
+        contig_id = last_good_alignment['ref_name']
+        if contig_id not in contig_structure:
+            continue
             
-            telomeres_in_region = []
-            for telomere in contig_telomeres:
-                if telomere['start'] >= extract_start and telomere['end'] <= extract_end:
-                    telomeres_in_region.append(telomere)
-            
-            has_telomere_in_region = len(telomeres_in_region) > 0
-            
-            region = {
-                'ref_name': ref_name,
-                'query_name': query_name,
-                'contig_id': contig_id,
-                'alignment_start': last_good_alignment['s1'],
-                'alignment_end': last_good_alignment['e1'],
-                'extract_start': extract_start,
-                'extract_end': extract_end,
-                'type': 'last_alignment_with_subsequent',
-                'alignment_info': last_good_alignment,
-                'alignment_length': last_good_alignment['len1'],
-                'identity': last_good_alignment['identity'],
-                'contig_length': contig_len,
-                'telomeres_in_region': telomeres_in_region,
-                'has_telomere_in_region': has_telomere_in_region,
-                'extracted_region_length': extract_end - extract_start + 1,
-                'is_reverse': last_good_alignment['is_reverse'],
-                'direction_info': direction_info,
-                'max_extraction_length': max_extraction_length
-            }
-            regions_to_extract.append(region)
+        contig_len = contig_structure[contig_id]['sequence_length']
+        contig_telomeres = contig_structure[contig_id]['telomeres']
+        
+        extract_start = last_good_alignment['s1']
+        extract_end = contig_len
+        
+        telomeres_in_region = []
+        for telomere in contig_telomeres:
+            if telomere['start'] >= extract_start and telomere['end'] <= extract_end:
+                telomeres_in_region.append(telomere)
+        
+        has_telomere_in_region = len(telomeres_in_region) > 0
+        
+        region = {
+            'ref_name': ref_name,
+            'query_name': query_name,
+            'contig_id': contig_id,
+            'alignment_start': last_good_alignment['s1'],
+            'alignment_end': last_good_alignment['e1'],
+            'extract_start': extract_start,
+            'extract_end': extract_end,
+            'type': 'last_alignment_with_subsequent',
+            'alignment_info': last_good_alignment,
+            'alignment_length': last_good_alignment['len1'],
+            'identity': last_good_alignment['identity'],
+            'contig_length': contig_len,
+            'telomeres_in_region': telomeres_in_region,
+            'has_telomere_in_region': has_telomere_in_region,
+            'extracted_region_length': extract_end - extract_start + 1,
+            'is_reverse': last_good_alignment['is_reverse'],
+            'direction_info': direction_info,
+            'max_extraction_length': max_extraction_length
+        }
+        regions_to_extract.append(region)
     
     return regions_to_extract
 
@@ -428,8 +434,8 @@ def find_last_forward_alignment_for_5prime(
     contig_structure: Dict,
     ref_name: str,
     query_name: str,
-    threshold: float = 95.0,
-    min_length: int = 100
+    threshold: float = 99.0,
+    min_length: int = 15000
 ) -> Optional[Dict]:
     if (ref_name, query_name) not in alignments_by_pair:
         return None
@@ -453,8 +459,8 @@ def find_last_forward_alignment_for_3prime(
     contig_structure: Dict,
     ref_name: str,
     query_name: str,
-    threshold: float = 95.0,
-    min_length: int = 100
+    threshold: float = 99.0,
+    min_length: int = 15000
 ) -> Optional[Dict]:
     if (ref_name, query_name) not in alignments_by_pair:
         return None
@@ -665,8 +671,8 @@ def extract_sequences_from_coords(
     fragment_type: str = "both",
     min_repeats: int = 20,
     min_telomere_length: int = 500,
-    similarity_threshold: float = 95.0,
-    min_alignment_length: int = 100,
+    similarity_threshold: float = 99.0,
+    min_alignment_length: int = 15000,
     extend_before: int = 0,
     extend_after: int = 0,
     max_total_length: int = 5000000,
@@ -847,8 +853,8 @@ def extract_telomere_regions(
     fragment_type: str = "both",
     min_repeats: int = 20,
     min_telomere_length: int = 500,
-    similarity_threshold: float = 95.0,
-    min_alignment_length: int = 100,
+    similarity_threshold: float = 99.0,
+    min_alignment_length: int = 15000,
     extend_before: int = 0,
     extend_after: int = 0,
     max_total_length: int = 5000000,
@@ -962,7 +968,7 @@ def parse_command_line_args():
           
           # Custom parameters
           python telomere_extract_regions_enhanced.py -coords matches.coords -c telomere_contigs.fa -o output_dir \\
-            --min-repeats 20 --min-length 500 --similarity 95.0 --min-alignment 100
+            --min-repeats 20 --min-length 500 --similarity 99.0 --min-alignment 15000
           
           # Extend extraction regions
           python telomere_extract_regions_enhanced.py -coords matches.coords -c telomere_contigs.fa -o output_dir \\
@@ -990,10 +996,10 @@ def parse_command_line_args():
                        help="Minimum telomere repeats (default: 20)")
     parser.add_argument("--min-length", type=int, default=500,
                        help="Minimum telomere length(bp) (default: 500)")
-    parser.add_argument("--similarity", type=float, default=95.0,
-                       help="Alignment similarity threshold(%%%) (default: 95.0)")
-    parser.add_argument("--min-alignment", type=int, default=100,
-                       help="Minimum alignment length(bp) (default: 100)")
+    parser.add_argument("--similarity", type=float, default=99.0,
+                       help="Alignment similarity threshold(percentage) (default: 99.0)")
+    parser.add_argument("--min-alignment", type=int, default=15000,
+                       help="Minimum alignment length(bp) (default: 15000)")
     parser.add_argument("--extend-before", type=int, default=0,
                        help="Additional extension bp before alignment start (default: 0)")
     parser.add_argument("--extend-after", type=int, default=0,

@@ -10,6 +10,8 @@ Adapter pattern support added
 Updated for enhanced extract_te.py and add_te.py
 Optimized file organization and cleanup logic
 Fixed path handling issues
+FIXED: Removed selection_strategy parameter for add_te.py compatibility
+FIXED: Added similarity_threshold and min_alignment_length parameters for extract_te.py
 """
 
 import sys
@@ -182,15 +184,17 @@ def run_telomere_recovery(
     output_file: str = "recovered_genome.fasta",
     threads: int = 32,
     verbose: bool = False,
-    keep_intermediate: bool = False,  # New: whether to keep intermediate files
-    # extract_te.py new parameters
+    keep_intermediate: bool = False,
+    # extract_te.py parameters - FIXED: Added missing parameters
+    similarity_threshold: float = 99.0,        # NEW: Added parameter
+    min_alignment_length: int = 15000,         # NEW: Added parameter
     max_total_length: int = 5000000,
     max_alignment_keep: int = 10000,
-    # add_te.py new parameters
+    # add_te.py parameters
     minimap2_mode: str = 'asm5',
     min_match_length: int = 100,
     min_mapq: int = 20,
-    selection_strategy: str = 'minimal_extension'
+    selection_strategy: str = None  # Made optional, not used in add_te.py
 ) -> Dict[str, Any]:
     """
     Main telomere recovery function
@@ -211,6 +215,10 @@ def run_telomere_recovery(
         Whether to show detailed output (default: False)
     keep_intermediate : bool, optional
         Whether to keep intermediate files (default: False)
+    similarity_threshold : float, optional
+        Alignment similarity threshold for extraction (default: 99.0)
+    min_alignment_length : int, optional
+        Minimum alignment length for extraction (default: 15000)
     max_total_length : int, optional
         Maximum extraction total length(bp) (default: 5000000)
     max_alignment_keep : int, optional
@@ -222,7 +230,7 @@ def run_telomere_recovery(
     min_mapq : int, optional
         Minimum mapping quality (default: 20)
     selection_strategy : str, optional
-        Selection strategy: 'first_success', 'minimal_extension', 'balanced' (default: 'minimal_extension')
+        Selection strategy - NOT USED in add_te.py (kept for backward compatibility)
     
     Returns:
     -------
@@ -242,6 +250,11 @@ def run_telomere_recovery(
         'processing_time': 0
     }
     
+    # Print warning if selection_strategy was provided
+    if selection_strategy is not None:
+        print(f"Note: selection_strategy parameter '{selection_strategy}' is not used in add_te.py")
+        print(f"      add_te.py uses simplified telomere-first logic (always prioritizes telomere restoration)")
+    
     try:
         # Create output directory
         os.makedirs(output_dir, exist_ok=True)
@@ -254,8 +267,15 @@ def run_telomere_recovery(
         print(f"Output file: {output_file}")
         print(f"Threads: {threads}")
         print(f"Keep intermediate files: {'Yes' if keep_intermediate else 'No'}")
-        print(f"Extraction length limit: ≤{max_total_length:,}bp (alignment ≤{max_alignment_keep:,}bp)")
-        print(f"Merge strategy: {selection_strategy} (minimap2 mode: {minimap2_mode})")
+        print(f"Extraction parameters:")
+        print(f"  - Similarity threshold: {similarity_threshold}%")
+        print(f"  - Min alignment length: {min_alignment_length:,}bp")
+        print(f"  - Max total length: {max_total_length:,}bp")
+        print(f"  - Max alignment keep: {max_alignment_keep:,}bp")
+        print(f"Merge parameters:")
+        print(f"  - minimap2 mode: {minimap2_mode}")
+        print(f"  - Min match length: {min_match_length}bp")
+        print(f"  - Min MAPQ: {min_mapq}")
         print("="*80)
         
         # Check module availability
@@ -278,12 +298,12 @@ def run_telomere_recovery(
         alignment_result = run_alignment_pipeline(
             contigs=contigs_file,
             query=genome_file,
-            output=abs_output_dir,  # Use absolute path
+            output=abs_output_dir,
             threads=threads,
-            min_repeats=5,            # Chromosome telomere detection parameter
-            contig_min_repeats=20,    # Contig telomere detection parameter
-            contig_min_length=500,    # Contig telomere minimum length
-            skip_extract=False,       # Don't skip telomere extraction
+            min_repeats=5,
+            contig_min_repeats=20,
+            contig_min_length=500,
+            skip_extract=False,
             verbose=verbose
         )
         
@@ -374,19 +394,20 @@ def run_telomere_recovery(
         # Step 2: Extract repair sequences from alignment results
         print_header(2, "Extract repair sequences from alignment results")
         
+        # FIXED: Pass the similarity_threshold and min_alignment_length parameters
         extraction_result = extract_telomere_regions(
             coords_file=coords_file,
             contig_file=telomere_contigs,
-            output_dir=output_dir,     # In output directory
-            fragment_type="both",      # Extract both 5' and 3' ends
-            min_repeats=20,            # Minimum telomere repeats
-            min_telomere_length=500,   # Minimum telomere length
-            similarity_threshold=95.0, # Alignment similarity threshold
-            min_alignment_length=100,  # Minimum alignment length
-            extend_before=0,           # Don't extend before alignment
-            extend_after=0,            # Don't extend after alignment
-            max_total_length=max_total_length,     # New: maximum total length
-            max_alignment_keep=max_alignment_keep, # New: maximum alignment keep length
+            output_dir=output_dir,
+            fragment_type="both",
+            min_repeats=20,
+            min_telomere_length=500,
+            similarity_threshold=similarity_threshold,    # FIXED: Now using parameter
+            min_alignment_length=min_alignment_length,    # FIXED: Now using parameter
+            extend_before=0,
+            extend_after=0,
+            max_total_length=max_total_length,
+            max_alignment_keep=max_alignment_keep,
             verbose=verbose
         )
         
@@ -431,17 +452,16 @@ def run_telomere_recovery(
         print_header(3, "Merge repair sequences into chromosomes")
         
         # Build parameters for merge_telomere_sequences
+        # Note: selection_strategy is intentionally omitted as add_te.py uses simplified logic
         merge_params = {
             'genome_file': genome_file,
             'repair_file': extracted_file,
-            'output_dir': output_dir,      # In output directory
-            'search_range': 5000000,       # Search range
-            'min_similarity': 0.6,         # Minimum similarity
-            # New parameters
+            'output_dir': output_dir,
+            'search_range': 5000000,
+            'min_similarity': 0.6,
             'minimap2_mode': minimap2_mode,
             'min_match_length': min_match_length,
             'min_mapq': min_mapq,
-            'selection_strategy': selection_strategy,
             'verbose': verbose
         }
         
@@ -556,9 +576,13 @@ def run_telomere_recovery(
                 'chromosomes_repaired': chromosomes_repaired,
                 'extraction_regions': total_regions,
                 'total_extension_bp': total_extension,
-                'selection_strategy': selection_strategy,
-                'minimap2_mode': minimap2_mode,
+                'similarity_threshold': similarity_threshold,
+                'min_alignment_length': min_alignment_length,
                 'max_total_length': max_total_length,
+                'max_alignment_keep': max_alignment_keep,
+                'minimap2_mode': minimap2_mode,
+                'min_match_length': min_match_length,
+                'min_mapq': min_mapq,
                 'total_time_seconds': processing_time,
                 'keep_intermediate': keep_intermediate,
                 'output_directory': output_dir
@@ -589,6 +613,8 @@ class TelomereRecoveryAdapter:
     Adapter class for telomere_recovery_controller.py
     Provides unified controller interface
     Updated for enhanced extract_te.py and add_te.py
+    FIXED: Removed selection_strategy dependency for add_te.py
+    FIXED: Added similarity_threshold and min_alignment_length parameters
     """
     
     def __init__(self, config: Dict[str, Any] = None):
@@ -636,6 +662,13 @@ class TelomereRecoveryAdapter:
             return False, "Thread count must be greater than 0"
         
         # Check new parameters
+        if 'similarity_threshold' in config:
+            if config['similarity_threshold'] <= 0 or config['similarity_threshold'] > 100:
+                return False, "similarity_threshold must be between 0 and 100"
+        
+        if 'min_alignment_length' in config and config['min_alignment_length'] <= 0:
+            return False, "min_alignment_length must be greater than 0"
+        
         if 'max_total_length' in config and config['max_total_length'] <= 0:
             return False, "max_total_length must be greater than 0"
         
@@ -648,10 +681,10 @@ class TelomereRecoveryAdapter:
         if 'min_mapq' in config and config['min_mapq'] < 0:
             return False, "min_mapq must be greater than or equal to 0"
         
+        # selection_strategy is now optional and not used - just warn if provided
         if 'selection_strategy' in config:
-            valid_strategies = ['first_success', 'minimal_extension', 'balanced']
-            if config['selection_strategy'] not in valid_strategies:
-                return False, f"selection_strategy must be one of {', '.join(valid_strategies)}"
+            print(f"Note: selection_strategy parameter '{config['selection_strategy']}' will be ignored")
+            print(f"      add_te.py uses simplified telomere-first logic")
         
         if 'minimap2_mode' in config:
             valid_modes = ['asm5', 'asm10', 'asm20', 'map-ont', 'map-pb']
@@ -691,7 +724,7 @@ class TelomereRecoveryAdapter:
         try:
             self.status = "running"
             
-            # Prepare parameters (including new parameters)
+            # Prepare parameters (excluding selection_strategy)
             params = {
                 'genome_file': self.config['query_fasta'],
                 'contigs_file': self.config['contigs_file'],
@@ -700,14 +733,16 @@ class TelomereRecoveryAdapter:
                 'threads': self.config.get('threads', 32),
                 'verbose': self.config.get('verbose', False),
                 'keep_intermediate': self.config.get('keep_intermediate', False),
-                # extract_te.py new parameters
+                # extract_te.py parameters - FIXED: Added new parameters
+                'similarity_threshold': self.config.get('similarity_threshold', 99.0),
+                'min_alignment_length': self.config.get('min_alignment_length', 15000),
                 'max_total_length': self.config.get('max_total_length', 5000000),
                 'max_alignment_keep': self.config.get('max_alignment_keep', 10000),
-                # add_te.py new parameters
+                # add_te.py parameters
                 'minimap2_mode': self.config.get('minimap2_mode', 'asm5'),
                 'min_match_length': self.config.get('min_match_length', 100),
                 'min_mapq': self.config.get('min_mapq', 20),
-                'selection_strategy': self.config.get('selection_strategy', 'minimal_extension')
+                # selection_strategy is NOT passed to add_te.py
             }
             
             # Run telomere recovery process
@@ -766,7 +801,7 @@ class TelomereRecoveryAdapter:
             "status": "success",
             "module": "telomere_recovery",
             "timestamp": time.strftime("%Y%m%d_%H%M%S"),
-            "pipeline_version": "telomere_recovery_v2",
+            "pipeline_version": "telomere_recovery_v2_fixed",
             "input_files": {
                 "query_fasta": self.config.get('query_fasta', ''),
                 "contigs_file": self.config.get('contigs_file', '')
@@ -783,9 +818,13 @@ class TelomereRecoveryAdapter:
                 "chromosomes_repaired": raw_result.get('chromosomes_repaired', 0),
                 "extraction_regions": raw_result.get('statistics', {}).get('extraction_regions', 0),
                 "total_extension_bp": raw_result.get('total_extension', 0),
-                "selection_strategy": raw_result.get('statistics', {}).get('selection_strategy', 'minimal_extension'),
-                "minimap2_mode": raw_result.get('statistics', {}).get('minimap2_mode', 'asm5'),
+                "similarity_threshold": raw_result.get('statistics', {}).get('similarity_threshold', 99.0),
+                "min_alignment_length": raw_result.get('statistics', {}).get('min_alignment_length', 15000),
                 "max_total_length": raw_result.get('statistics', {}).get('max_total_length', 5000000),
+                "max_alignment_keep": raw_result.get('statistics', {}).get('max_alignment_keep', 10000),
+                "minimap2_mode": raw_result.get('statistics', {}).get('minimap2_mode', 'asm5'),
+                "min_match_length": raw_result.get('statistics', {}).get('min_match_length', 100),
+                "min_mapq": raw_result.get('statistics', {}).get('min_mapq', 20),
                 "keep_intermediate": raw_result.get('statistics', {}).get('keep_intermediate', False),
                 "processing_time": raw_result.get('processing_time', 0)
             },
@@ -794,12 +833,13 @@ class TelomereRecoveryAdapter:
                 "timestamp": time.strftime("%Y%m%d_%H%M%S"),
                 "steps_completed": list(raw_result.get('steps', {}).keys()),
                 "parameters_used": {
+                    "similarity_threshold": self.config.get('similarity_threshold', 99.0),
+                    "min_alignment_length": self.config.get('min_alignment_length', 15000),
                     "max_total_length": self.config.get('max_total_length', 5000000),
                     "max_alignment_keep": self.config.get('max_alignment_keep', 10000),
                     "minimap2_mode": self.config.get('minimap2_mode', 'asm5'),
                     "min_match_length": self.config.get('min_match_length', 100),
                     "min_mapq": self.config.get('min_mapq', 20),
-                    "selection_strategy": self.config.get('selection_strategy', 'minimal_extension'),
                     "keep_intermediate": self.config.get('keep_intermediate', False)
                 }
             }
@@ -885,14 +925,16 @@ class TelomereRecoveryAdapter:
             "keep_intermediate": False,
             "include_raw_result": False,
             "cleanup_temp_files": True,
-            # extract_te.py new parameters
+            # extract_te.py parameters - FIXED: Added defaults
+            "similarity_threshold": 99.0,
+            "min_alignment_length": 15000,
             "max_total_length": 5000000,
             "max_alignment_keep": 10000,
-            # add_te.py new parameters
+            # add_te.py parameters
             "minimap2_mode": "asm5",
             "min_match_length": 100,
-            "min_mapq": 20,
-            "selection_strategy": "minimal_extension"
+            "min_mapq": 20
+            # selection_strategy removed - not used in add_te.py
         }
     
     def get_module_info(self) -> Dict[str, Any]:
@@ -904,15 +946,15 @@ class TelomereRecoveryAdapter:
         """
         return {
             "name": "TelomereRecoveryAdapter",
-            "version": "2.0",
-            "description": "Telomere recovery controller adapter - Recover and repair chromosome telomeres (adapted for enhanced sub-modules)",
+            "version": "2.2",
+            "description": "Telomere recovery controller adapter - Recover and repair chromosome telomeres (FIXED: added similarity_threshold and min_alignment_length parameters)",
             "capabilities": [
                 "Chromosome telomere status analysis",
                 "Telomere contig alignment",
                 "Intelligent length-limited repair sequence extraction",
+                "Configurable similarity threshold and minimum alignment length",
                 "minimap2 single-sided alignment merging",
-                "Multiple selection strategies (first_success/minimal_extension/balanced)",
-                "Telomere integrity verification",
+                "Telomere integrity verification (strict telomere-first logic)",
                 "Organized file output",
                 "Optional intermediate file preservation",
                 "Automatic file finding and path repair"
@@ -928,15 +970,17 @@ class TelomereRecoveryAdapter:
                     "verbose": "Verbose output mode",
                     "keep_intermediate": "Whether to keep intermediate files",
                     # extract_te.py parameters
+                    "similarity_threshold": "Alignment similarity threshold (%)",
+                    "min_alignment_length": "Minimum alignment length (bp)",
                     "max_total_length": "Maximum extraction total length(bp)",
                     "max_alignment_keep": "Maximum alignment keep length(bp)",
                     # add_te.py parameters
                     "minimap2_mode": "minimap2 alignment mode (asm5/asm10/asm20/map-ont/map-pb)",
                     "min_match_length": "Minimum match length(bp)",
-                    "min_mapq": "Minimum mapping quality(0-60)",
-                    "selection_strategy": "Selection strategy (first_success/minimal_extension/balanced)"
+                    "min_mapq": "Minimum mapping quality(0-60)"
                 }
-            }
+            },
+            "notes": "selection_strategy parameter is not used - add_te.py always prioritizes telomere restoration"
         }
     
     def check_dependencies(self) -> Dict[str, bool]:
@@ -983,40 +1027,47 @@ def get_controller_api(config: Dict[str, Any] = None):
 def main():
     """Command line main function"""
     parser = argparse.ArgumentParser(
-        description="Telomere Recovery Controller Script - Unified controller for three telomere processing sub-modules (adapted for enhanced version)",
+        description="Telomere Recovery Controller Script - Unified controller for three telomere processing sub-modules (FIXED version)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
         Complete process:
           1. Analyze chromosome telomere status, identify chromosomes lacking telomeres
           2. Use contigs alignment and extract repair sequences (supports intelligent length limits)
-          3. Merge repair sequences into corresponding chromosome ends (supports multiple selection strategies)
+          3. Merge repair sequences into corresponding chromosome ends (strict telomere-first logic)
           
         New features:
           - extract_te.py: Intelligent length limits, prevent extracting overly long sequences
-          - add_te.py: minimap2 single-sided alignment, supports multiple selection strategies
+          - Configurable similarity threshold and minimum alignment length
+          - add_te.py: minimap2 single-sided alignment, strict telomere-first logic
           - Organized file output: All results saved in specified directory
           - Optional intermediate file preservation
           - Automatic file finding and path repair
+          - FIXED: selection_strategy parameter removed (add_te.py uses simplified logic)
+          - FIXED: Added similarity_threshold and min_alignment_length parameters
           
         Usage examples:
-          # Basic usage (using default output directory)
+          # Basic usage (using default parameters: 99% similarity, 15kb min alignment)
           python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta
           
+          # Custom extraction parameters (strict filtering)
+          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \\
+            --similarity 99.5 --min-alignment 20000 --max-total-length 5000000
+          
+          # Custom extraction parameters (relaxed filtering)
+          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \\
+            --similarity 95.0 --min-alignment 5000 --max-total-length 3000000
+          
           # Specify output directory and filename
-          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \
+          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \\
             -o recovered_genome.fasta -d recovery_results
           
           # Keep intermediate files (for debugging)
-          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \
+          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \\
             --keep-intermediate -v
           
-          # Custom extraction length limits
-          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \
-            --max-total-length 1000000 --max-alignment-keep 5000
-          
-          # Custom merge strategy
-          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \
-            --strategy balanced --minimap2-mode asm10 --min-match-length 200
+          # Custom merge parameters
+          python telomere_recovery_controller.py -q genome.fasta -c contigs.fasta \\
+            --minimap2-mode asm10 --min-match-length 200
           
           # Adapter mode
           python telomere_recovery_controller.py --adapter-mode --config config.json
@@ -1044,23 +1095,26 @@ def main():
     parser.add_argument("--keep-intermediate", action="store_true",
                        help="Keep intermediate files (for debugging)")
     
-    # extract_te.py new parameters
+    # extract_te.py parameters - FIXED: Added new parameters
+    parser.add_argument("--similarity", type=float, default=99.0,
+                       help="Alignment similarity threshold %% (default: 99.0)")
+    parser.add_argument("--min-alignment", type=int, default=15000,
+                       help="Minimum alignment length in bp (default: 15000)")
     parser.add_argument("--max-total-length", type=int, default=5000000,
-                       help="Maximum extraction total length(bp) (default: 5,000,000)")
+                       help="Maximum extraction total length in bp (default: 5,000,000)")
     parser.add_argument("--max-alignment-keep", type=int, default=10000,
-                       help="Maximum alignment keep length(bp) (default: 10000)")
+                       help="Maximum alignment keep length in bp (default: 10000)")
     
-    # add_te.py new parameters
+    # add_te.py parameters
     parser.add_argument("--minimap2-mode", default='asm5',
                        choices=['asm5', 'asm10', 'asm20', 'map-ont', 'map-pb'],
                        help="minimap2 alignment mode (default: asm5)")
     parser.add_argument("--min-match-length", type=int, default=100,
-                       help="Minimum match length(bp) (default: 100)")
+                       help="Minimum match length in bp (default: 100)")
     parser.add_argument("--min-mapq", type=int, default=20,
                        help="Minimum mapping quality (default: 20)")
-    parser.add_argument("--strategy", default='minimal_extension',
-                       choices=['first_success', 'minimal_extension', 'balanced'],
-                       help="Selection strategy (default: minimal_extension)")
+    
+    # Note: selection_strategy parameter removed - add_te.py uses simplified logic
     
     # Adapter mode parameters
     parser.add_argument("--adapter-mode", action="store_true",
@@ -1118,12 +1172,14 @@ def main():
                 'verbose': args.verbose,
                 'keep_intermediate': args.keep_intermediate,
                 # New parameters
+                'similarity_threshold': args.similarity,
+                'min_alignment_length': args.min_alignment,
                 'max_total_length': args.max_total_length,
                 'max_alignment_keep': args.max_alignment_keep,
                 'minimap2_mode': args.minimap2_mode,
                 'min_match_length': args.min_match_length,
-                'min_mapq': args.min_mapq,
-                'selection_strategy': args.strategy
+                'min_mapq': args.min_mapq
+                # selection_strategy intentionally omitted
             }
         
         # Create adapter and run
@@ -1157,7 +1213,7 @@ def main():
             print(f"Error: Contigs file does not exist: {args.contigs}")
             sys.exit(1)
         
-        # Run telomere recovery process
+        # Run telomere recovery process with all parameters
         result = run_telomere_recovery(
             genome_file=args.query,
             contigs_file=args.contigs,
@@ -1167,12 +1223,14 @@ def main():
             verbose=args.verbose,
             keep_intermediate=args.keep_intermediate,
             # New parameters
+            similarity_threshold=args.similarity,
+            min_alignment_length=args.min_alignment,
             max_total_length=args.max_total_length,
             max_alignment_keep=args.max_alignment_keep,
             minimap2_mode=args.minimap2_mode,
             min_match_length=args.min_match_length,
-            min_mapq=args.min_mapq,
-            selection_strategy=args.strategy
+            min_mapq=args.min_mapq
+            # selection_strategy intentionally omitted
         )
         
         # Output result
@@ -1187,7 +1245,15 @@ def main():
             print(f"  Chromosomes successfully repaired: {stats.get('chromosomes_repaired', 0)}")
             print(f"  Extraction regions: {stats.get('extraction_regions', 0)}")
             print(f"  Total extension length: {stats.get('total_extension_bp', 0):,} bp")
-            print(f"  Selection strategy: {stats.get('selection_strategy', 'minimal_extension')}")
+            print(f"  Extraction parameters:")
+            print(f"    - Similarity threshold: {stats.get('similarity_threshold', 99.0)}%")
+            print(f"    - Min alignment length: {stats.get('min_alignment_length', 15000):,} bp")
+            print(f"    - Max total length: {stats.get('max_total_length', 5000000):,} bp")
+            print(f"    - Max alignment keep: {stats.get('max_alignment_keep', 10000):,} bp")
+            print(f"  Merge parameters:")
+            print(f"    - minimap2 mode: {stats.get('minimap2_mode', 'asm5')}")
+            print(f"    - Min match length: {stats.get('min_match_length', 100)} bp")
+            print(f"    - Min MAPQ: {stats.get('min_mapq', 20)}")
             print(f"  Output directory: {stats.get('output_directory', args.output_dir)}")
             print(f"  Keep intermediate files: {'Yes' if stats.get('keep_intermediate', False) else 'No'}")
             print(f"  Total processing time: {stats.get('total_time_seconds', 0):.2f} seconds")

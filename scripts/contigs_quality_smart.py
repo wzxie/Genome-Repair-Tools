@@ -23,6 +23,9 @@ class QualityConfig:
     merqury_path: str = "merqury.sh"
     craq_path: str = "craq"
     
+    # External Meryl database path
+    external_meryl_db: Optional[str] = None
+    
     kmer_size: int = 21
     threads: int = 32
     memory_gb: int = 80
@@ -71,16 +74,18 @@ class QualityPipeline:
         print(f"Output directory: {self.output_dir}")
         
         try:
-            has_meryl, has_merqury, existing_qv_scores, existing_craq_scores = \
+            # Now returns 5 values including meryl_db
+            has_meryl, has_merqury, existing_qv_scores, existing_craq_scores, meryl_db = \
                 self.check_existing_results()
             
-            meryl_db = None
+            # Run meryl only if no existing database found
             if not self.config.skip_meryl and not self.config.only_analyze:
-                meryl_db = self.run_meryl_count_if_needed(has_meryl)
+                if meryl_db is None:  # Only run if no existing database
+                    meryl_db = self.run_meryl_count_if_needed(has_meryl)
             
             qv_scores = {}
             if not self.config.skip_merqury and not self.config.only_analyze:
-                if meryl_db and meryl_db.exists():
+                if meryl_db and Path(meryl_db).exists():
                     qv_scores = self.run_merqury_if_needed(meryl_db, has_merqury, existing_qv_scores)
             else:
                 qv_scores = existing_qv_scores if existing_qv_scores else {}
@@ -132,7 +137,8 @@ class QualityPipeline:
                 'total_length': sum(c['length'] for c in filtered_contigs) if filtered_contigs else 0,
                 'qv_scores_count': len(qv_scores),
                 'craq_scores_count': len(craq_scores),
-                'filtered_contigs': filtered_contigs[:10] if filtered_contigs else []
+                'filtered_contigs': filtered_contigs[:10] if filtered_contigs else [],
+                'meryl_db_used': str(meryl_db) if meryl_db else None
             }
             
             return self.results
@@ -150,14 +156,23 @@ class QualityPipeline:
     
     def validate_inputs(self) -> bool:
         """Validate input files"""
-        if not self.config.only_analyze and not self.config.reads_files:
-            print("Error: Reads files required or use --only-analyze mode")
+        # Can skip reads files if external Meryl database is provided
+        if not self.config.only_analyze and not self.config.reads_files and not self.config.external_meryl_db:
+            print("Error: Reads files or external Meryl database required, or use --only-analyze mode")
             return False
         
         contigs_path = Path(self.config.contigs_file)
         if not contigs_path.exists():
             print(f"Error: Contigs file does not exist: {self.config.contigs_file}")
             return False
+        
+        # Validate external Meryl database
+        if self.config.external_meryl_db:
+            external_db = Path(self.config.external_meryl_db)
+            if not external_db.exists():
+                print(f"Warning: External Meryl database does not exist: {self.config.external_meryl_db}")
+            else:
+                print(f"External Meryl database: {external_db}")
         
         if self.config.reads_files:
             for rf in self.config.reads_files:
@@ -166,10 +181,11 @@ class QualityPipeline:
         
         print(f"Contigs: {self.config.contigs_file}")
         print(f"Reads: {len(self.config.reads_files)} files")
+        print(f"External Meryl DB: {self.config.external_meryl_db or 'None'}")
         print(f"Output prefix: {self.config.output_prefix}")
         return True
     
-    def check_existing_results(self) -> Tuple[bool, bool, Dict, Dict]:
+    def check_existing_results(self) -> Tuple[bool, bool, Dict, Dict, Optional[Path]]:
         """Check for existing result files"""
         print("\n" + "="*60)
         print("CHECKING FOR EXISTING RESULTS")
@@ -179,14 +195,29 @@ class QualityPipeline:
         has_merqury = False
         qv_scores = {}
         craq_scores = {}
+        meryl_db = None
         
-        meryl_db = self.output_dir / f"reads_{self.config.kmer_size}mer.meryl"
-        if meryl_db.exists() and not self.config.force_rerun:
-            print(f"✓ Found existing meryl database: {meryl_db}")
-            has_meryl = True
-        else:
-            print(f"✗ No meryl database found or force rerun enabled")
+        # Priority 1: Use external Meryl database if specified
+        if self.config.external_meryl_db:
+            external_db = Path(self.config.external_meryl_db)
+            if external_db.exists() and not self.config.force_rerun:
+                print(f"✓ Using external meryl database: {external_db}")
+                meryl_db = external_db
+                has_meryl = True
+            elif not external_db.exists():
+                print(f"✗ External meryl database does not exist: {external_db}")
         
+        # Priority 2: Check locally generated database
+        if not has_meryl:
+            local_meryl_db = self.output_dir / f"reads_{self.config.kmer_size}mer.meryl"
+            if local_meryl_db.exists() and not self.config.force_rerun:
+                print(f"✓ Found existing local meryl database: {local_meryl_db}")
+                meryl_db = local_meryl_db
+                has_meryl = True
+            else:
+                print(f"✗ No local meryl database found or force rerun enabled")
+        
+        # Check Merqury QV file
         qv_file = self.output_dir / "merqury_qv.txt"
         if qv_file.exists() and not self.config.force_rerun:
             print(f"✓ Found existing merqury QV file: {qv_file}")
@@ -201,6 +232,7 @@ class QualityPipeline:
                     shutil.copy2(file, qv_file)
                     break
         
+        # Check CRAQ results
         craq_dir = self.output_dir / "craq_output"
         if craq_dir.exists() and not self.config.force_rerun:
             print(f"✓ Found existing CRAQ directory: {craq_dir}")
@@ -210,7 +242,7 @@ class QualityPipeline:
             else:
                 print(f"  Could not parse existing CRAQ scores")
         
-        return has_meryl, has_merqury, qv_scores, craq_scores
+        return has_meryl, has_merqury, qv_scores, craq_scores, meryl_db
     
     def run_meryl_count_if_needed(self, has_meryl: bool) -> Optional[Path]:
         """Run meryl if needed"""
@@ -219,6 +251,10 @@ class QualityPipeline:
         if has_meryl and not self.config.force_rerun:
             print(f"✓ Skipping meryl (using existing database)")
             return meryl_db.resolve()
+        
+        if not self.config.reads_files:
+            print("✗ Cannot run meryl: no reads files provided")
+            return None
         
         print(f"Running meryl count (k={self.config.kmer_size})...")
         
@@ -243,6 +279,10 @@ class QualityPipeline:
             print(f"\n✓ Skipping merqury (using existing QV scores)")
             print(f"  Found {len(existing_qv_scores)} existing QV scores")
             return existing_qv_scores
+        
+        if meryl_db is None:
+            print("✗ No meryl database available for merqury")
+            return {}
         
         print("\n" + "="*60)
         print("RUNNING MERQURY")
@@ -556,20 +596,24 @@ class QualityPipeline:
             return {}
     
     def find_and_parse_craq_report(self, craq_dir: Path) -> Dict[str, float]:
-        """Find and parse CRAQ out_regional.Report file"""
+        """Find and parse CRAQ out_final.Report file - extracts scores from parentheses"""
         print(f"\nLooking for CRAQ report in: {craq_dir}")
         
         possible_paths = []
         
-        for pattern in ["**/out_regional.Report", "**/*.Report", "**/*report*"]:
+        # Priority: look for out_final.Report files
+        for pattern in ["**/out_final.Report", "**/*.Report", "**/*final*report*"]:
             for file_path in craq_dir.glob(pattern):
                 if file_path.exists() and file_path.stat().st_size > 0:
                     if file_path not in possible_paths:
                         possible_paths.append(file_path)
                         print(f"  Found report candidate: {file_path.relative_to(craq_dir)}")
         
+        # Common paths
         common_paths = [
-            craq_dir / "runAQI_out" / "out_regional.Report",
+            craq_dir / "runAQI_out" / "out_final.Report",  # Primary path
+            craq_dir / "out_final.Report",
+            craq_dir / "runAQI_out" / "out_regional.Report",  # Alternative
             craq_dir / "out_regional.Report"
         ]
         
@@ -577,6 +621,9 @@ class QualityPipeline:
             if path.exists() and path.stat().st_size > 0 and path not in possible_paths:
                 possible_paths.append(path)
                 print(f"  Found common report: {path.relative_to(craq_dir)}")
+        
+        # Sort by priority: out_final.Report first
+        possible_paths.sort(key=lambda x: 0 if "out_final.Report" in str(x) else 1)
         
         print(f"Checking {len(possible_paths)} possible report files...")
         
@@ -589,6 +636,7 @@ class QualityPipeline:
         
         print("⚠ No valid CRAQ report file found or all files empty!")
         
+        # Debug: list directory contents
         print(f"\nDirectory contents of {craq_dir}:")
         for item in craq_dir.rglob("*"):
             if item.is_file():
@@ -598,7 +646,9 @@ class QualityPipeline:
         return {}
     
     def parse_craq_report_file(self, report_file: Path) -> Dict[str, float]:
-        """Parse CRAQ Report file"""
+        """Parse CRAQ Report file - extracts score from parentheses in second last column"""
+        # Import re inside the function to ensure it's available
+        import re
         craq_scores = {}
         
         try:
@@ -608,67 +658,96 @@ class QualityPipeline:
             print(f"Parsing CRAQ report: {report_file}")
             print(f"Total lines: {len(lines)}")
             
-            for line in lines:
+            # Find where data starts
+            start_processing = False
+            for line_num, line in enumerate(lines):
                 line = line.strip()
                 
-                if not line or line.startswith('#') or line.startswith('Short') or line.startswith('Report'):
+                # Skip empty lines
+                if not line:
                     continue
                 
-                parts = re.split(r'\s+', line)
-                if len(parts) < 2:
+                # Find header line
+                if line.startswith('#Chr') or 'Covered.Rate' in line or 'Avg.CRE(R-AQI)' in line:
+                    start_processing = True
+                    print(f"Found header at line {line_num + 1}: {line}")
                     continue
                 
-                contig = parts[0]
-                if contig == "Genome":
-                    continue
-                
-                score = None
-                
-                try:
-                    last_col = parts[-1].strip()
-                    last_col = last_col.strip('()')
-                    score = float(last_col)
-                except ValueError:
-                    pass
-                
-                if score is None and len(parts) >= 2:
-                    try:
-                        second_last = parts[-2].strip()
-                        second_last = second_last.strip('()')
-                        score = float(second_last)
-                    except ValueError:
-                        pass
-                
-                if score is None:
-                    for i, part in enumerate(parts):
+                # Process data lines
+                if start_processing:
+                    # Skip comment lines
+                    if line.startswith('#'):
+                        continue
+                    
+                    # Split line by whitespace (tabs or spaces)
+                    parts = re.split(r'\s+', line)
+                    if len(parts) < 6:  # Need at least 6 columns
+                        continue
+                    
+                    contig = parts[0]
+                    
+                    # Skip summary lines
+                    if contig in ["Genome", "Total", "Summary"]:
+                        continue
+                    
+                    # Get second last column (Avg.CRE(R-AQI) column)
+                    # Format: "0.115956336230135(98.8471336632426)"
+                    second_last_col = parts[-2].strip()
+                    
+                    # Extract score from inside parentheses
+                    score = None
+                    
+                    # Method 1: Extract number inside parentheses
+                    match = re.search(r'\(([^)]+)\)', second_last_col)
+                    if match:
                         try:
-                            clean_part = part.strip('()')
-                            val = float(clean_part)
-                            if 0 <= val <= 100:
-                                score = val
-                                break
+                            score = float(match.group(1))
+                            if len(craq_scores) < 3:  # Print first few examples
+                                print(f"  Extracted from parentheses: {second_last_col} -> {score}")
                         except ValueError:
-                            continue
-                
-                if score is not None:
-                    craq_scores[contig] = score
+                            pass
+                    
+                    # Method 2: If method 1 fails, try to find any number in parentheses
+                    if score is None:
+                        # Look for pattern like (number)
+                        paren_match = re.findall(r'\(([^)]+)\)', second_last_col)
+                        if paren_match:
+                            try:
+                                score = float(paren_match[-1])  # Take the last parentheses content
+                                print(f"  Extracted using fallback: {second_last_col} -> {score}")
+                            except ValueError:
+                                pass
+                    
+                    # Save score if successfully extracted
+                    if score is not None:
+                        craq_scores[contig] = score
+                        if len(craq_scores) <= 5:  # Print first 5 examples
+                            print(f"  Example: {contig} -> {score:.4f} (from '{second_last_col}')")
             
             if craq_scores:
-                print(f"\nParsed CRAQ scores for {len(craq_scores)} contigs")
+                print(f"\n✓ Parsed CRAQ scores for {len(craq_scores)} contigs")
                 
-                print("Sample CRAQ scores (first 5):")
-                for i, (contig, score) in enumerate(list(craq_scores.items())[:5]):
+                # Statistics
+                scores_list = list(craq_scores.values())
+                min_score = min(scores_list)
+                max_score = max(scores_list)
+                avg_score = sum(scores_list) / len(scores_list)
+                print(f"  Score range: {min_score:.4f} - {max_score:.4f}, average: {avg_score:.4f}")
+                
+                # Show sample scores
+                print("\nSample CRAQ scores (from parentheses, rounded to 2 decimal places):")
+                for contig, score in list(craq_scores.items())[:5]:
                     print(f"  {contig}: {score:.2f}")
-                
-                min_score = min(craq_scores.values())
-                max_score = max(craq_scores.values())
-                avg_score = sum(craq_scores.values()) / len(craq_scores)
-                print(f"Score range: {min_score:.2f} - {max_score:.2f}, average: {avg_score:.2f}")
                 
                 return craq_scores
             else:
                 print("⚠ No valid CRAQ scores found in report")
                 
+                # Print first 10 lines for debugging
+                print("\nFirst 10 lines of file for debugging:")
+                for i, line in enumerate(lines[:10]):
+                    print(f"  Line {i+1}: {line.strip()}")
+                    
         except Exception as e:
             print(f"Error parsing CRAQ report {report_file}: {e}")
             import traceback
@@ -771,7 +850,10 @@ class QualityPipeline:
                 
                 f.write("PARAMETERS:\n")
                 f.write(f"  Minimum QV: {self.config.min_qv}\n")
-                f.write(f"  Minimum length: {self.config.min_length:,} bp\n\n")
+                f.write(f"  Minimum length: {self.config.min_length:,} bp\n")
+                if self.config.external_meryl_db:
+                    f.write(f"  External Meryl DB: {self.config.external_meryl_db}\n")
+                f.write("\n")
                 
                 f.write("INPUT STATISTICS:\n")
                 f.write(f"  Total contigs: {len(sequences)}\n")
@@ -906,6 +988,7 @@ def run_quality_pipeline(
     skip_craq: bool = False,
     only_analyze: bool = False,
     working_dir: Optional[str] = None,
+    external_meryl_db: Optional[str] = None,
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -926,6 +1009,7 @@ def run_quality_pipeline(
         skip_craq: Skip CRAQ step
         only_analyze: Use only existing results for analysis, don't run any tools
         working_dir: Working directory
+        external_meryl_db: Path to external Meryl database
         **kwargs: Other parameters
         
     Returns:
@@ -945,7 +1029,8 @@ def run_quality_pipeline(
         skip_merqury=skip_merqury,
         skip_craq=skip_craq,
         only_analyze=only_analyze,
-        working_dir=working_dir
+        working_dir=working_dir,
+        external_meryl_db=external_meryl_db
     )
     
     for key, value in kwargs.items():
@@ -970,36 +1055,112 @@ def run_quality_pipeline_from_json(json_file: str) -> Dict[str, Any]:
     return run_quality_pipeline_from_dict(config_dict)
 
 
+def test_craq_parser():
+    """Test CRAQ parser functionality - verifies extraction of scores from parentheses"""
+    test_content = """#Chr	Covered.Rate	Low-confident.Rate	Avg.CRH	Avg.CSH	Avg.CRE(R-AQI)	Avg.CSE(S-AQI)
+Genome	0.995782863	0.007482992	0.014962108	0.007481054	0.115956336230135(98.8471336632426)	0.0299242158013251(97.0519080772449)
+Chr3_RagTag	0.999792065	0.002824466	0	0	0.0765047782206809(99.2378712595736)	0(100)
+Chr1_RagTag	0.998388014	0.006531438	0.030735327	0	0.09220598201676(99.0821781159545)	0(100)
+Chr5_RagTag	0.995915193	0.006757991	0	0	0.0999421967647978(99.0055556574048)	0(100)
+Chr4_RagTag	0.989851745	0.01291176	0	0	0.136222639739568(98.6470099189802)	0.0454075465798559(95.5607947711069)
+Chr2_RagTag	0.993043469	0.009873145	0.04466446	0.04466446	0.200990068142779(98.0101631762718)	0.133993378761853(87.4595855491604)"""
+    
+    # Create temporary file
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.Report', delete=False) as f:
+        f.write(test_content)
+        temp_file = Path(f.name)
+    
+    try:
+        # Test parsing
+        pipeline = QualityPipeline()
+        scores = pipeline.parse_craq_report_file(temp_file)
+        
+        print("\n" + "="*60)
+        print("CRAQ PARSER TEST RESULTS")
+        print("="*60)
+        print(f"Parsed {len(scores)} contigs")
+        
+        # Expected values (scores inside parentheses)
+        expected = {
+            'Chr3_RagTag': 99.2378712595736,
+            'Chr1_RagTag': 99.0821781159545,
+            'Chr5_RagTag': 99.0055556574048,
+            'Chr4_RagTag': 98.6470099189802,
+            'Chr2_RagTag': 98.0101631762718
+        }
+        
+        print("\nValidation (should match scores inside parentheses):")
+        print("-" * 60)
+        print(f"{'Contig':<15} {'Parsed':>12} {'Expected':>12} {'Diff':>12}")
+        print("-" * 60)
+        
+        all_correct = True
+        for contig, expected_score in expected.items():
+            if contig in scores:
+                diff = abs(scores[contig] - expected_score)
+                status = "✓" if diff < 0.0001 else "✗"
+                print(f"{status} {contig:<13} {scores[contig]:>12.4f} {expected_score:>12.4f} {diff:>12.6f}")
+                if diff >= 0.0001:
+                    all_correct = False
+            else:
+                print(f"✗ {contig:<13} {'NOT FOUND':>12} {expected_score:>12.4f} {'N/A':>12}")
+                all_correct = False
+        
+        print("-" * 60)
+        if all_correct:
+            print("✓ All scores correctly parsed (values from parentheses)")
+        else:
+            print("✗ Some scores don't match expected values")
+        
+        # Print parsed scores rounded to 2 decimal places
+        print("\nCRAQ Scores (from parentheses, rounded to 2 decimal places):")
+        for contig, score in list(scores.items())[:5]:
+            print(f"  {contig}: {score:.2f}")
+        
+    finally:
+        # Clean up temporary file
+        temp_file.unlink()
+
+
 def parse_arguments():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(
-        description="Contig quality assessment and filtering - supports skipping completed steps",
+        description="Contig quality assessment and filtering - supports skipping completed steps and using external Meryl database",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # First run (complete pipeline)
-  python contigs_quality_smart.py -r reads.fastq.gz -c contigs.fasta
+  python contigs_quality_smart.py -r reads.fastq.gz -c contigs.fasta -o filtered
   
-  # Second run (skip existing results)
-  python contigs_quality_smart.py -r reads.fastq.gz -c contigs.fasta
+  # Use external Meryl database
+  python contigs_quality_smart.py --meryl-db /path/to/existing/reads.meryl -c contigs.fasta -o filtered
   
   # Force rerun all steps
   python contigs_quality_smart.py -r reads.fastq.gz -c contigs.fasta --force-rerun
+  
+  # Test CRAQ parser
+  python contigs_quality_smart.py --test
   
   # As a module
   from contigs_quality_smart import run_quality_pipeline
   results = run_quality_pipeline(
       contigs_file="contigs.fasta",
       reads_files=["reads.fastq.gz"],
+      external_meryl_db="/path/to/reads.meryl",
       output_prefix="filtered_contigs"
   )
         """
     )
     
     parser.add_argument('-r', '--reads', nargs='+', required=False,
-                       help='Sequencing reads files (can be omitted if results already exist)')
+                       help='Sequencing reads files (can be omitted if using external Meryl database)')
     parser.add_argument('-c', '--contigs', required=True,
                        help='Assembled contigs file')
+    
+    # External Meryl database parameter
+    parser.add_argument('--meryl-db', dest='external_meryl_db',
+                       help='Path to existing meryl database (skip meryl counting step)')
     
     parser.add_argument('--meryl-path', default='meryl',
                        help='Path to meryl')
@@ -1034,12 +1195,21 @@ Examples:
     parser.add_argument('--skip-craq', action='store_true',
                        help='Skip CRAQ step')
     
+    # Test option
+    parser.add_argument('--test', action='store_true',
+                       help='Run CRAQ parser test and exit')
+    
     return parser.parse_args()
 
 
 def main():
     """Command line main function"""
     args = parse_arguments()
+    
+    # Run test if requested
+    if args.test:
+        test_craq_parser()
+        sys.exit(0)
     
     results = run_quality_pipeline(
         contigs_file=args.contigs,
@@ -1057,7 +1227,8 @@ def main():
         only_analyze=args.only_analyze,
         meryl_path=args.meryl_path,
         merqury_path=args.merqury_path,
-        craq_path=args.craq_path
+        craq_path=args.craq_path,
+        external_meryl_db=args.external_meryl_db
     )
     
     print("\n" + "="*80)
@@ -1066,6 +1237,8 @@ def main():
         print(f"  Produced {results['filtered_contigs_count']} high-quality contigs")
         print(f"  Total length: {results['total_length']:,} bp")
         print(f"  Output: {results['output_file']}")
+        if results.get('meryl_db_used'):
+            print(f"  Meryl DB used: {results['meryl_db_used']}")
     else:
         print("✗ PIPELINE FAILED")
         print(f"  Error: {results.get('error', 'Unknown error')}")
