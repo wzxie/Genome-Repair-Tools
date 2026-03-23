@@ -35,9 +35,6 @@ class AssemblyConfig:
     flye_genome_size: str = "1g"
     flye_iterations: int = 1
     flye_nano_type: str = "hq"
-    shasta_config: str = None
-    shasta_memory_backing: str = "4K"
-    shasta_memory_mode: str = "anonymous"
     
     auto_estimate_genome: bool = True
     estimate_method: str = "kmer"
@@ -48,7 +45,6 @@ class AssemblyConfig:
     verkko_threads: Optional[int] = None
     nextdenovo_threads: Optional[int] = None
     flye_threads: Optional[int] = None
-    shasta_threads: Optional[int] = None
     
     tools_to_run: List[str] = field(default_factory=lambda: ['all'])
     
@@ -151,7 +147,7 @@ class ONTGenomeSizeEstimator:
                 long_reads_ratio = max(long_reads_ratio, file_long_ratio)
         
         if total_long_bases == 0:
-            print("  警告: 没有找到足够的长reads (>=10kb)")
+            print("   Warning: No long reads found (>=10kb)")
             return None
         
         if long_reads_ratio == 0:
@@ -176,7 +172,7 @@ class ONTGenomeSizeEstimator:
             
             filtered_reads = temp_dir / "filtered_reads.fastq"
             
-            print(f"  提取长reads进行k-mer分析...")
+            print(f"  Extracting long reads for k-mer analysis...")
             for file_path in reads_files:
                 if str(file_path).endswith('.gz'):
                     cmd = f"zcat {file_path} | awk 'BEGIN{{RS=\"@\";FS=\"\\n\"}} length($2)>=10000 {{print \"@\"$0}}' >> {filtered_reads}"
@@ -186,7 +182,7 @@ class ONTGenomeSizeEstimator:
                 subprocess.run(cmd, shell=True, check=True, capture_output=True)
             
             if not filtered_reads.exists() or filtered_reads.stat().st_size == 0:
-                print("  没有足够的长reads进行k-mer分析")
+                print("  No long reads available for k-mer analysis")
                 return None
             
             meryl_db = temp_dir / "meryl_db"
@@ -216,7 +212,7 @@ class ONTGenomeSizeEstimator:
                 lines = f.readlines()
             
             if len(lines) < 10:
-                print("  k-mer频谱数据不足")
+                print("  Insufficient k-mer spectrum data")
                 return None
             
             total_kmers = 0
@@ -252,7 +248,7 @@ class ONTGenomeSizeEstimator:
                 return f"{int(genome_size_bp/1000)}k"
             
         except Exception as e:
-            print(f"  ONT k-mer分析错误: {e}")
+            print(f"  ONT k-mer analysis error: {e}")
             return None
         finally:
             if temp_dir.exists():
@@ -510,29 +506,29 @@ class GenomeSizeEstimator:
         estimated_size = None
         
         if read_type == "ont":
-            print("ONT数据: 使用专用估算方法...")
+            print("ONT data: Using specialized estimation methods...")
             
-            print(" 尝试策略1: 基于长reads的文件大小估算...")
+            print("  Strategy 1: File size based estimation with long reads...")
             estimated_size = ONTGenomeSizeEstimator.estimate_from_long_reads_only(
                 reads_files, target_depth=target_depth, min_length=10000
             )
             if estimated_size:
-                print(f"  策略1结果: {estimated_size}")
+                print(f"  Strategy 1 result: {estimated_size}")
             
             if not estimated_size and method in ["kmer", "hybrid"]:
-                print(" 尝试策略2: 大k-mer分析 (k=31)...")
+                print("  Strategy 2: Large k-mer analysis (k=31)...")
                 estimated_size = ONTGenomeSizeEstimator.estimate_ont_with_meryl(
                     reads_files, k=31, threads=threads
                 )
                 if estimated_size:
-                    print(f"  策略2结果: {estimated_size}")
+                    print(f"  Strategy 2 result: {estimated_size}")
             
             if not estimated_size:
-                print(" 尝试策略3: 快速文件大小估算...")
+                print("  Strategy 3: Quick file size estimation...")
                 estimated_size = GenomeSizeEstimator.estimate_from_file_size(
                     reads_files, target_depth
                 )
-                print(f"  策略3结果: {estimated_size}")
+                print(f"  Strategy 3 result: {estimated_size}")
         
         else:
             if method == "kmer" or method == "hybrid":
@@ -560,7 +556,7 @@ class GenomeSizeEstimator:
 def print_title():
     print("\n" + "="*70)
     print("      Genome Assembly Tool Control Center (HiFi / ONT / CLR)")
-    print("      hifiasm | verkko | nextDenovo | flye | shasta")
+    print("      hifiasm | verkko | nextDenovo | flye")
     print("="*70)
     print("Supports: HiFi, ONT Ultra-Long, PacBio CLR")
     print("Integrated k-mer analysis for automatic genome size estimation")
@@ -1328,127 +1324,6 @@ class FlyeTool(AssemblyTool):
         return fasta_files
 
 
-class ShastaTool(AssemblyTool):
-    
-    def __init__(self):
-        super().__init__("shasta", ['hifi', 'ont_ul', 'clr'])
-        self.description = "ONT/HiFi fast assembly tool"
-        self.temp_dir = None
-    
-    def build_command(self, data: Dict[str, Any], config: AssemblyConfig) -> Tuple[List[str], str]:
-        out_dir = f"{data['output_prefix']}.shasta"
-        out_path = Path(out_dir)
-        
-        if out_path.exists() and any(out_path.iterdir()):
-            print(f"Shasta output directory already exists and is not empty: {out_dir}")
-            choice = input("Delete and restart? (y/n): ").lower()
-            if choice == 'y':
-                print(f"Deleting {out_dir} ...")
-                shutil.rmtree(out_dir)
-            else:
-                print("Shasta execution cancelled by user.")
-                return [], ""
-        
-        threads = self.get_threads(data)
-        
-        input_files = []
-        default_config = None
-        
-        if data.get('ont_ul'):
-            input_files = data['ont_ul']
-            default_config = "Nanopore-May2022"
-            print("ONT data, using default configuration: Nanopore-May2022")
-        elif data.get('hifi'):
-            input_files = data['hifi']
-            default_config = "HiFi-Oct2021"
-            print("HiFi data, using default configuration: HiFi-Oct2021")
-        elif data.get('clr'):
-            input_files = data['clr']
-            default_config = "Nanopore-OldGuppy-Sep2020"
-            print("CLR data, using default configuration: Nanopore-OldGuppy-Sep2020")
-        else:
-            print("Shasta requires ONT / HiFi / CLR input.")
-            return [], ""
-        
-        import tempfile
-        self.temp_dir = Path(tempfile.mkdtemp(prefix="shasta_tmp_"))
-        print(f"Temporary decompression directory: {self.temp_dir}")
-        
-        try:
-            uncompressed_files = decompress_gz_files(input_files, self.temp_dir, threads)
-        except Exception as e:
-            print(f"Decompression failed: {e}")
-            if self.temp_dir.exists():
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-            return [], ""
-        
-        cmd = [
-            "shasta",
-            "--assemblyDirectory", str(out_path),
-            "--threads", str(threads),
-            "--memoryMode", config.shasta_memory_mode
-        ]
-        
-        cmd += ["--input"] + uncompressed_files
-        
-        shasta_config = config.shasta_config if config.shasta_config else default_config
-        cmd += ["--config", shasta_config]
-        cmd += ["--memoryBacking", config.shasta_memory_backing]
-        
-        print(f"Shasta configuration file: {shasta_config}")
-        print(f"Note: Temporary decompressed files are in {self.temp_dir}")
-        
-        return cmd, out_dir
-    
-    def process_output(self, output_path: str) -> List[Path]:
-        fasta_files = []
-        output_dir = Path(output_path)
-        
-        if not output_dir.exists():
-            print(f"shasta output directory not found: {output_path}")
-            return fasta_files
-        
-        priority_files = ["Assembly.fasta", "assembly.fasta", "contigs.fasta", "contigs.fa"]
-        
-        for filename in priority_files:
-            fasta_file = output_dir / filename
-            if fasta_file.exists() and fasta_file.stat().st_size > 0:
-                new_name = f"{self.name}.fa"
-                new_path = Path.cwd() / new_name
-                
-                print(f"Copying {fasta_file} -> {new_path}")
-                shutil.copy2(fasta_file, new_path)
-                fasta_files.append(new_path)
-                break
-        
-        if not fasta_files:
-            backup_patterns = ["*.fasta", "*.fa"]
-            for pattern in backup_patterns:
-                for fasta_file in output_dir.glob(pattern):
-                    if fasta_file.exists() and fasta_file.stat().st_size > 0:
-                        new_name = f"{self.name}.fa"
-                        new_path = Path.cwd() / new_name
-                        
-                        print(f"Copying {fasta_file} -> {new_path}")
-                        shutil.copy2(fasta_file, new_path)
-                        fasta_files.append(new_path)
-                        break
-                if fasta_files:
-                    break
-        
-        if self.temp_dir and self.temp_dir.exists():
-            try:
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-                print(f"Cleaned up temporary directory: {self.temp_dir}")
-            except Exception as e:
-                print(f"Warning: Failed to clean up temporary directory {self.temp_dir}: {e}")
-        
-        if not fasta_files:
-            print(f"No FASTA files found in {output_path}")
-        
-        return fasta_files
-
-
 class AssemblyPipeline:
     
     def __init__(self, config: Optional[AssemblyConfig] = None):
@@ -1457,8 +1332,7 @@ class AssemblyPipeline:
             'hifiasm': HifiasmTool(),
             'verkko': VerkkoTool(),
             'nextdenovo': NextDenovoTool(),
-            'flye': FlyeTool(),
-            'shasta': ShastaTool()
+            'flye': FlyeTool()
         }
         self.results = {}
         self.completed_tools = []
@@ -1750,19 +1624,11 @@ def collect_tool_config_interactive() -> Dict[str, Any]:
     if auto_estimate_genome:
         target_depth = int(ask("Target sequencing depth (X):", default="30"))
     
-    verkko_memory_gb = int(ask("verkko: Maximum memory (GB) [自动估算将覆盖此值]:", default="64"))
-    nextdenovo_genome_size = ask("nextDenovo: Estimated genome size (e.g., 3g, 1.5m) [自动估算将覆盖]:", default="1g")
-    flye_genome_size = ask("Flye: Estimated genome size (e.g., 3g) [自动估算将覆盖]:", default="1g")
+    verkko_memory_gb = int(ask("verkko: Maximum memory (GB) [Auto estimation will override this]:", default="64"))
+    nextdenovo_genome_size = ask("nextDenovo: Estimated genome size (e.g., 3g, 1.5m) [Auto estimation will override]:", default="1g")
+    flye_genome_size = ask("Flye: Estimated genome size (e.g., 3g) [Auto estimation will override]:", default="1g")
     flye_iterations = int(ask("Flye: Polishing iterations:", default="1"))
     flye_nano_type = ask("Flye: ONT data type?", options=['raw', 'hq'], default='hq')
-    shasta_memory_backing = ask("Shasta: memoryBacking (4K recommended, 2M requires large pages):", 
-                               options=['4K', '2M'], default='4K')
-    
-    print("\nShasta configuration notes:")
-    print("  - HiFi data default: HiFi-Oct2021")
-    print("  - ONT data default: Nanopore-May2022")
-    print("  - CLR data default: Nanopore-OldGuppy-Sep2020")
-    shasta_config = ask("Shasta: Configuration file (leave empty for default):", required=False)
     
     return {
         'auto_estimate_genome': auto_estimate_genome,
@@ -1772,9 +1638,7 @@ def collect_tool_config_interactive() -> Dict[str, Any]:
         'nextdenovo_genome_size': nextdenovo_genome_size,
         'flye_genome_size': flye_genome_size,
         'flye_iterations': flye_iterations,
-        'flye_nano_type': flye_nano_type,
-        'shasta_memory_backing': shasta_memory_backing,
-        'shasta_config': shasta_config if shasta_config else None
+        'flye_nano_type': flye_nano_type
     }
 
 
@@ -1872,21 +1736,17 @@ Examples:
     parser.add_argument('--run-verkko', action='store_true', help='Run verkko')
     parser.add_argument('--run-nextdenovo', action='store_true', help='Run nextDenovo')
     parser.add_argument('--run-flye', action='store_true', help='Run flye')
-    parser.add_argument('--run-shasta', action='store_true', help='Run shasta')
     
     parser.add_argument('--hifiasm-threads', type=int, help='hifiasm-specific thread count')
     parser.add_argument('--verkko-threads', type=int, help='verkko-specific thread count')
     parser.add_argument('--nextdenovo-threads', type=int, help='nextDenovo-specific thread count')
     parser.add_argument('--flye-threads', type=int, help='flye-specific thread count')
-    parser.add_argument('--shasta-threads', type=int, help='shasta-specific thread count')
     
-    parser.add_argument('--verkko-memory', type=int, default=64, help='verkko maximum memory (GB) [自动估算将覆盖]')
+    parser.add_argument('--verkko-memory', type=int, default=64, help='verkko maximum memory (GB) [Auto estimation will override]')
     parser.add_argument('--flye-genome-size', default='1g', help='Flye genome size estimate (overrides automatic estimation)')
     parser.add_argument('--nextdenovo-genome-size', default='1g', help='nextDenovo genome size estimate (overrides automatic estimation)')
     parser.add_argument('--flye-iterations', type=int, default=1, help='Flye polishing iterations')
     parser.add_argument('--flye-nano_type', choices=['raw', 'hq'], default='hq', help='Flye ONT data type')
-    parser.add_argument('--shasta-config', help='Shasta configuration file or built-in config name (default: HiFi data uses HiFi-Oct2021, ONT data uses Nanopore-May2022, CLR data uses Nanopore-OldGuppy-Sep2020)')
-    parser.add_argument('--shasta-memory-backing', choices=['4K', '2M'], default='4K', help='Shasta memoryBacking')
     
     parser.add_argument('-i', '--interactive', action='store_true', help='Interactive mode')
     parser.add_argument('--config', help='JSON configuration file path')
@@ -1903,8 +1763,7 @@ def cli_mode(args):
             'run_hifiasm': 'hifiasm',
             'run_verkko': 'verkko',
             'run_nextdenovo': 'nextdenovo',
-            'run_flye': 'flye',
-            'run_shasta': 'shasta'
+            'run_flye': 'flye'
         }
         
         for arg_name, tool_name in tool_mapping.items():
@@ -1932,13 +1791,10 @@ def cli_mode(args):
         flye_genome_size=args.flye_genome_size,
         flye_iterations=args.flye_iterations,
         flye_nano_type=args.flye_nano_type,
-        shasta_config=args.shasta_config if args.shasta_config else None,
-        shasta_memory_backing=args.shasta_memory_backing,
         hifiasm_threads=args.hifiasm_threads,
         verkko_threads=args.verkko_threads,
         nextdenovo_threads=args.nextdenovo_threads,
         flye_threads=args.flye_threads,
-        shasta_threads=args.shasta_threads,
         tools_to_run=tools_to_run
     )
     
