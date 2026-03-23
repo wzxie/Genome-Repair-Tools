@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Find gap positions in each chromosome of a FASTA file
-Usage: python find_gaps.py input.fasta > gaps.bed
+Usage: findgap.py input.fasta [--min-size SIZE] [--gap-char CHAR] [--output OUTPUT]
 """
 
 import re
 import sys
+import argparse
 from Bio import SeqIO
 
 def find_gaps_in_fasta(fasta_file, gap_char='N', min_gap_size=1):
@@ -42,9 +43,6 @@ def find_gaps_in_fasta(fasta_file, gap_char='N', min_gap_size=1):
                         'end': end,
                         'length': gap_length
                     })
-                    
-                    # output BED format
-                    print(f"{seq_id}\t{start}\t{end}\tgap_{len(gaps_found)}\t{gap_length}")
     
     except FileNotFoundError:
         print(f"Error: File '{fasta_file}' not found", file=sys.stderr)
@@ -56,23 +54,44 @@ def find_gaps_in_fasta(fasta_file, gap_char='N', min_gap_size=1):
     return gaps_found
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python find_gaps.py input.fasta")
-        print("Output: BED format gap position information")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description='Find gap positions in FASTA file',
+        epilog='Example: findgap.py genome.fasta --min-size 10 --output gaps.bed'
+    )
+    parser.add_argument('input', help='Input FASTA file')
+    parser.add_argument('--min-size', '-m', type=int, default=1,
+                        help='Minimum gap size (default: 1)')
+    parser.add_argument('--gap-char', '-c', default='N',
+                        help='Gap character (default: N)')
+    parser.add_argument('--output', '-o', help='Output BED file (default: stdout)')
     
-    fasta_file = sys.argv[1]
+    args = parser.parse_args()
     
-    print(f"# Gap position report - Input file: {fasta_file}", file=sys.stderr)
-    print(f"# Output format: chromosome\\tstart position\\tend position\\tgap name\\tgap length", file=sys.stderr)
-    print("# BED format output:", file=sys.stderr)
+    # Print header to stderr
+    print(f"# Gap position report - Input file: {args.input}", file=sys.stderr)
+    print(f"# Gap character: {args.gap_char}, Minimum size: {args.min_size}", file=sys.stderr)
+    print("# Output format: chromosome\\tstart\\tend\\tgap_name\\tgap_length", file=sys.stderr)
     
-    # output BED header
-    print("track name=Gaps description=\"Genome gaps\" visibility=2")
+    # Find gaps
+    gaps = find_gaps_in_fasta(args.input, args.gap_char, args.min_size)
     
-    gaps = find_gaps_in_fasta(fasta_file)
+    # Prepare output
+    output_lines = []
+    output_lines.append("track name=Gaps description=\"Genome gaps\" visibility=2")
     
-    # statistics output to stderr
+    for i, gap in enumerate(gaps, 1):
+        line = f"{gap['chrom']}\t{gap['start']}\t{gap['end']}\tgap_{i}\t{gap['length']}"
+        output_lines.append(line)
+    
+    # Write output
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write('\n'.join(output_lines))
+        print(f"\n# Output written to: {args.output}", file=sys.stderr)
+    else:
+        print('\n'.join(output_lines))
+    
+    # Statistics
     print(f"\n# Statistics:", file=sys.stderr)
     print(f"# Total gaps found: {len(gaps)}", file=sys.stderr)
     
