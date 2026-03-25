@@ -2,6 +2,7 @@
 """
 Telomere Alignment Tool - Complex alignment, generate coords files
 Part 1: Extract telomere contigs, run nucmer alignment
+Modified: Added reverse complement support
 """
 
 import sys
@@ -52,7 +53,7 @@ def find_telomere_sequences(sequence, min_repeats=20, min_telomere_length=500):
     
     return matches
 
-def extract_telomere_contigs(input_file, output_file, min_repeats=20, min_telomere_length=500):
+def extract_telomere_contigs(input_file, output_file, min_repeats=20, min_telomere_length=500, add_reverse_complement=True):
     printv(f"Extracting telomere-containing contigs (repeats {min_repeats} times, length {min_telomere_length}bp)...")
     
     telomere_contigs = []
@@ -81,7 +82,25 @@ def extract_telomere_contigs(input_file, output_file, min_repeats=20, min_telome
         raise
     
     if telomere_contigs:
+        # Write original sequences
         SeqIO.write(telomere_contigs, output_file, "fasta")
+        
+        # Add reverse complement sequences to the same file
+        if add_reverse_complement:
+            printv(f"Adding reverse complement sequences to {output_file}...")
+            with open(output_file, 'a') as f:
+                for record in telomere_contigs:
+                    # Generate reverse complement
+                    rc_seq = record.seq.reverse_complement()
+                    rc_id = f"{record.id}_rc"
+                    rc_description = f"{record.description} [reverse_complement]"
+                    rc_record = SeqRecord(rc_seq, id=rc_id, description=rc_description)
+                    
+                    # Write to the same file
+                    SeqIO.write(rc_record, f, "fasta")
+            
+            printv(f"Added {len(telomere_contigs)} reverse complement sequences")
+        
         printv(f"Extracted {len(telomere_contigs)} telomere-containing contigs")
     else:
         printv("No telomere-containing contigs found")
@@ -372,6 +391,7 @@ def run_alignment_pipeline(
     contig_min_repeats: int = 20,
     contig_min_length: int = 500,
     skip_extract: bool = False,
+    add_reverse_complement: bool = True,
     verbose: bool = False
 ) -> Dict[str, Any]:
     
@@ -402,6 +422,7 @@ def run_alignment_pipeline(
             print(f"nucmer threads: {threads}")
             print(f"Chromosome telomere detection: minimum {min_repeats} repeats")
             print(f"Contig telomere detection: minimum {contig_min_repeats} repeats, minimum length {contig_min_length}bp")
+            print(f"Add reverse complement sequences: {add_reverse_complement}")
             print("="*70)
         
         telomere_contigs_file = None
@@ -414,7 +435,8 @@ def run_alignment_pipeline(
             telomere_contigs_file = os.path.join(output, "telomere_contigs.fa")
             telomere_count, total_count = extract_telomere_contigs(
                 contigs, telomere_contigs_file, 
-                contig_min_repeats, contig_min_length
+                contig_min_repeats, contig_min_length,
+                add_reverse_complement
             )
             if telomere_count == 0:
                 return {
@@ -489,7 +511,9 @@ def run_alignment_pipeline(
             json.dump(query_data_simple, f, indent=2)
         
         if verbose:
-            print(f"\nStep 4: Preparing telomere contigs")
+            print(f"\nStep 4: Preparing telomere contigs for alignment")
+        
+        # Use the same telomere contigs file (already contains original and RC sequences)
         temp_contig_dir = os.path.join(output, "temp_contigs")
         os.makedirs(temp_contig_dir, exist_ok=True)
         
@@ -500,7 +524,7 @@ def run_alignment_pipeline(
             telomere_contigs_list.append(contig_file)
         
         if verbose:
-            print(f"Prepared {len(telomere_contigs_list)} telomere contigs for alignment")
+            print(f"Prepared {len(telomere_contigs_list)} telomere contigs (including reverse complement) for alignment")
         
         if verbose:
             print(f"\nStep 5: Starting telomere alignment")
@@ -603,14 +627,15 @@ def run_alignment_pipeline(
             f.write(f"Output directory: {output}\n")
             f.write(f"nucmer threads: {threads}\n")
             f.write(f"Chromosome telomere detection: {min_repeats} repeats\n")
-            f.write(f"Contig telomere detection: {contig_min_repeats} repeats, {contig_min_length}bp\n\n")
+            f.write(f"Contig telomere detection: {contig_min_repeats} repeats, {contig_min_length}bp\n")
+            f.write(f"Added reverse complement sequences: {add_reverse_complement}\n\n")
             
             f.write("Alignment statistics:\n")
             f.write(f"- Total chromosomes: {len(chromosome_status)}\n")
             f.write(f"- Chromosomes needing repair: {len(needs_repair)}\n")
             f.write(f"- Successfully aligned chromosomes: {successful_chromosomes}/{len(query_data)}\n")
             f.write(f"- Total successful alignments: {total_successful_matches}\n")
-            f.write(f"- Telomere contigs: {telomere_count}/{total_count}\n\n")
+            f.write(f"- Telomere contigs (including RC): {telomere_count}/{total_count}\n\n")
             
             f.write("Detailed alignment by chromosome:\n")
             for seq_id, summary in results_summary.items():
@@ -636,7 +661,8 @@ def run_alignment_pipeline(
                 'total_successful_matches': total_successful_matches,
                 'telomere_contigs_count': telomere_count,
                 'total_contigs_count': total_count,
-                'processing_time': total_time
+                'processing_time': total_time,
+                'reverse_complement_added': add_reverse_complement
             },
             'report_file': report_file,
             'output_dir': output,
@@ -654,7 +680,7 @@ def run_alignment_pipeline(
             print(f"Processing time: {total_time:.2f} seconds")
             print(f"Main output files:")
             for file_desc, file_path in [
-                ("Telomere contigs", telomere_contigs_file),
+                ("Telomere contigs (with RC)", telomere_contigs_file),
                 ("Chromosome telomere analysis", analysis_file),
                 ("Chromosome end information", query_data_file),
                 ("All successful alignments coords file", final_coords),
@@ -693,11 +719,14 @@ Usage examples:
   python telomere_alignment.py -c contigs.fasta -q genome.fasta -o results -t 64
   
   # Custom parameters
-  python telomere_alignment.py -c contigs.fasta -q genome.fasta -o results \
+  python telomere_alignment.py -c contigs.fasta -q genome.fasta -o results \\
     --min-repeats 5 --contig-min-repeats 20 --contig-min-length 500
   
   # Skip telomere extraction step (use existing telomere contigs)
   python telomere_alignment.py -c telomere_contigs.fasta -q genome.fasta -o results --skip-extract
+  
+  # Do not add reverse complement sequences
+  python telomere_alignment.py -c contigs.fasta -q genome.fasta -o results --no-reverse-complement
         """
     )
     
@@ -710,6 +739,8 @@ Usage examples:
     parser.add_argument("--contig-min-repeats", type=int, default=20, help="Minimum contig telomere repeats, default 20")
     parser.add_argument("--contig-min-length", type=int, default=500, help="Minimum contig telomere length, default 500bp")
     parser.add_argument("--skip-extract", action="store_true", help="Skip telomere extraction step")
+    parser.add_argument("--no-reverse-complement", action="store_true", 
+                        help="Do not add reverse complement sequences (default: add them)")
     parser.add_argument("--verbose", action="store_true", help="Show detailed output")
     
     return parser.parse_args()
@@ -726,6 +757,7 @@ def main():
         contig_min_repeats=args.contig_min_repeats,
         contig_min_length=args.contig_min_length,
         skip_extract=args.skip_extract,
+        add_reverse_complement=not args.no_reverse_complement,
         verbose=args.verbose
     )
     
@@ -738,7 +770,8 @@ def main():
         print(f"Chromosomes needing repair: {summary['needs_repair']}")
         print(f"Successfully aligned chromosomes: {summary['successful_chromosomes']}")
         print(f"Total successful alignments: {summary['total_successful_matches']}")
-        print(f"Telomere contigs: {summary['telomere_contigs_count']}/{summary['total_contigs_count']}")
+        print(f"Telomere contigs (including RC): {summary['telomere_contigs_count']}/{summary['total_contigs_count']}")
+        print(f"Reverse complement added: {summary.get('reverse_complement_added', False)}")
         print(f"Processing time: {summary['processing_time']:.2f} seconds")
         
         if result['coords_file']:
@@ -748,7 +781,7 @@ def main():
         
         print(f"\nMain output files:")
         files_to_check = [
-            (os.path.join(args.output, "telomere_contigs.fa"), "Telomere contigs"),
+            (os.path.join(args.output, "telomere_contigs.fa"), "Telomere contigs (with RC if enabled)"),
             (os.path.join(args.output, "telomere_analysis.json"), "Chromosome telomere analysis"),
             (os.path.join(args.output, "query_data.json"), "Chromosome end information"),
             (os.path.join(args.output, "all_successful_matches.coords"), "All successful alignments coords file"),

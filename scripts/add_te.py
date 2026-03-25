@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Telomere Repair Sequence Merge Script (Telomere-First Version)
+Telomere Repair Sequence Merge Script (Dual-End Repair Version with High Stringency)
 Modified for Plant Telomeres with Tabular Report
 Purpose: Merge extracted telomere repair sequences to corresponding chromosome ends
-Core Logic: PRIORITIZE SEQUENCES THAT RESTORE TELOMERES
+Core Logic: REPAIR BOTH ENDS SEPARATELY, PRIORITIZE SEQUENCES THAT RESTORE TELOMERES
 Features: 
   1. Try all candidates, not just first success
   2. Validate telomeres BEFORE and AFTER repair
@@ -12,6 +12,8 @@ Features:
   5. Support for both plant (TTTAGGG) and vertebrate (TTAGGG) telomeres
   6. Overlap length considered in scoring for reliable fusion
   7. Tabular report format for clear visualization
+  8. DUAL-END REPAIR: Repair both 5' and 3' ends separately
+  9. HIGH STRINGENCY: Minimum similarity 0.99, minimum overlap 3000bp
 """
 
 import sys
@@ -52,6 +54,10 @@ class LowQualityError(RepairError):
 
 class TelomereNotRestoredError(RepairError):
     """Failed to restore telomeres"""
+    pass
+
+class InsufficientOverlapError(RepairError):
+    """Overlap length too short"""
     pass
 
 # ============================================================================
@@ -377,8 +383,8 @@ class TelomereDetector:
 
 class Minimap2Matcher:
     
-    def __init__(self, mode: str = 'asm5', min_score: float = 0.7,
-                 min_match_length: int = 100, min_mapq: int = 20):
+    def __init__(self, mode: str = 'asm5', min_score: float = 0.99,
+                 min_match_length: int = 3000, min_mapq: int = 20):
         self.mode = mode
         self.min_score = min_score
         self.min_match_length = min_match_length
@@ -491,7 +497,7 @@ class Minimap2Matcher:
 
 
 # ============================================================================
-# Telomere repair main class - Modified with organism parameter
+# Telomere repair main class - Modified with high stringency parameters
 # ============================================================================
 
 class TelomereRepair:
@@ -499,12 +505,14 @@ class TelomereRepair:
     def __init__(self, config: Dict = None):
         self.config = config or {
             'minimap2_mode': 'asm5',
-            'min_score': 0.7,
-            'min_match_length': 100,
+            'min_score': 0.99,
+            'min_match_length': 3000,
             'min_mapq': 20,
             'search_range': 5000000,
             'min_telomere_repeats': 20,
-            'organism': 'plant'  # default to plant
+            'min_overlap_length': 3000,
+            'min_similarity': 0.99,
+            'organism': 'plant'
         }
         
         self.matcher = Minimap2Matcher(
@@ -545,7 +553,7 @@ class TelomereRepair:
                 printv(f"      Repair sequence position: {match['query_start']:,}-{match['query_end']:,} "
                       f"(length: {match['match_length']:,}bp)")
                 printv(f"      Chromosome position: {match['target_start']:,}-{match['target_end']:,}")
-                printv(f"      Similarity: {match['identity']:.3f}")
+                printv(f"      Similarity: {match['identity']:.4f}")
                 printv(f"      MAPQ: {match['mapq']}")
                 printv(f"      Strand: {match['strand']}")
             
@@ -564,7 +572,7 @@ class TelomereRepair:
                 printv(f"      Repair sequence position: {match['query_start']:,}-{match['query_end']:,} "
                       f"(length: {match['match_length']:,}bp)")
                 printv(f"      Chromosome position: {match['target_start']:,}-{match['target_end']:,}")
-                printv(f"      Similarity: {match['identity']:.3f}")
+                printv(f"      Similarity: {match['identity']:.4f}")
                 printv(f"      MAPQ: {match['mapq']}")
                 printv(f"      Strand: {match['strand']}")
             
@@ -579,8 +587,15 @@ class TelomereRepair:
         if not match:
             return False, "No match"
         
-        if match['identity'] < self.config['min_score']:
-            return False, f"Insufficient similarity: {match['identity']:.3f} < {self.config['min_score']}"
+        # Check similarity threshold (high stringency: 0.99)
+        min_similarity = self.config.get('min_similarity', 0.99)
+        if match['identity'] < min_similarity:
+            return False, f"Insufficient similarity: {match['identity']:.4f} < {min_similarity}"
+        
+        # Check overlap length threshold (high stringency: 3000bp)
+        min_overlap = self.config.get('min_overlap_length', 3000)
+        if match['match_length'] < min_overlap:
+            return False, f"Insufficient overlap length: {match['match_length']:,} < {min_overlap}"
         
         if match['match_length'] < self.config['min_match_length']:
             return False, f"Insufficient match length: {match['match_length']:,} < {self.config['min_match_length']}"
@@ -700,7 +715,7 @@ class TelomereRepair:
         if not match:
             raise NoOverlapError("No overlap found between sequences")
         
-        # 3. validate alignment quality
+        # 3. validate alignment quality (includes similarity and overlap length checks)
         is_valid, valid_msg = self.validate_match(
             match, repair_type, len(chr_seq), len(repair_seq)
         )
@@ -787,14 +802,18 @@ def parse_repair_sequence_id(seq_id: str) -> Dict[str, Any]:
     
     original_id = seq_id
     
-    # 1. identify repair type
+    # 1. identify repair type - more robust patterns
     type_patterns = [
-        (r'[_-]?5prime', '5prime'),
-        (r'[_-]?3prime', '3prime'),
-        (r'[_-]?5p', '5prime'),
-        (r'[_-]?3p', '3prime'),
-        (r'[_-]?five_prime', '5prime'),
-        (r'[_-]?three_prime', '3prime')
+        (r'[_-]?5prime[_-]?', '5prime'),
+        (r'[_-]?3prime[_-]?', '3prime'),
+        (r'[_-]?5p[_-]?', '5prime'),
+        (r'[_-]?3p[_-]?', '3prime'),
+        (r'[_-]?five_prime[_-]?', '5prime'),
+        (r'[_-]?three_prime[_-]?', '3prime'),
+        (r'[_-]?end5[_-]?', '5prime'),
+        (r'[_-]?end3[_-]?', '3prime'),
+        (r'[_-]?left[_-]?', '5prime'),
+        (r'[_-]?right[_-]?', '3prime'),
     ]
     
     for pattern, repair_type in type_patterns:
@@ -807,13 +826,15 @@ def parse_repair_sequence_id(seq_id: str) -> Dict[str, Any]:
     # 2. identify chromosome name
     # match common chromosome naming patterns
     chr_patterns = [
-        r'(?:chr|chromosome|scaffold|contig)[_\s]?([0-9]+|[A-Za-z])',
+        r'(?:chr|chromosome|scaffold|contig)[_\s]?([0-9]+|[A-Za-z]+)',
         r'([0-9]+)[_\s]?(?:chr|chromosome)',
         r'^([0-9]+)$',
-        r'chr([0-9]+|[A-Za-z])',
+        r'chr([0-9]+|[A-Za-z]+)',
         r'chromosome_?([0-9]+)',
         r'scaffold_?([0-9]+)',
-        r'contig_?([0-9]+)'
+        r'contig_?([0-9]+)',
+        r'Chr([0-9]+)',  # Chr3 format
+        r'Chr([A-Za-z]+)',
     ]
     
     for pattern in chr_patterns:
@@ -1018,38 +1039,31 @@ def calculate_selection_score(result_info: Dict, has_telomere: bool) -> float:
         return base_score
 
 
-def try_repair_chromosome(chr_id: str, chr_seq: str, 
-                         repair_sequences: List[Dict],
-                         config: Dict,
-                         selection_strategy: str = 'minimal_extension') -> Tuple[Optional[str], Dict, Dict, List[Dict]]:
+def try_repair_single_end(
+    chr_id: str,
+    chr_seq: str,
+    repair_sequences: List[Dict],
+    repairer: TelomereRepair,
+    target_end: str  # '5prime' or '3prime'
+) -> Tuple[Optional[Dict], Optional[str], List[Dict]]:
     """
-    Try to repair chromosome with all candidate sequences
-    Strictly prioritizes sequences that restore telomeres
-    
-    Returns:
-        (merged_seq, best_result_info, used_repair_info, all_candidates_info)
+    Try to repair a single end of a chromosome
+    Returns: (best_result_info, merged_sequence, candidates_list)
     """
-    printv(f"\n{'='*60}")
-    printv(f"Processing chromosome: {chr_id}")
-    printv(f"  Length: {len(chr_seq):,} bp")
-    printv(f"  Candidates: {len(repair_sequences)} sequences")
-    printv(f"  Goal: Find sequence that RESTORES telomeres")
-    printv(f"{'='*60}")
+    printv(f"\n    Testing {len(repair_sequences)} sequences for {target_end} end")
     
-    repairer = TelomereRepair(config)
-    
-    # store results by category
-    telomere_restored = []      # successfully restored telomeres
-    failed_attempts = []        # failed attempts (no telomere or other errors)
-    
-    # store all candidates for tabular display
+    telomere_restored = []
+    failed_attempts = []
     all_candidates = []
     
-    for i, repair_info in enumerate(repair_sequences):
-        printv(f"\n  >>> Attempt {i+1}/{len(repair_sequences)} <<<")
+    for i, repair_info in enumerate(repair_sequences, 1):
+        # Ensure repair type matches target
+        repair_info['repair_type'] = target_end
+        
+        printv(f"\n      >>> Attempt {i}/{len(repair_sequences)} for {target_end} end <<<")
         
         try:
-            # use repair process with verification
+            # Use repair process with verification
             merged_seq, stats = repairer.repair_with_verification(
                 chr_id, chr_seq, repair_info
             )
@@ -1057,17 +1071,16 @@ def try_repair_chromosome(chr_id: str, chr_seq: str,
             # If we get here, telomeres were successfully restored
             tel_after = stats.get('telomere_after', {})
             
-            # build result information
             result_info = {
                 'chromosome': chr_id,
                 'repair_id': repair_info['id'],
-                'repair_type': repair_info.get('repair_type', 'unknown'),
+                'repair_type': target_end,
                 'overlap_length': stats.get('overlap_len', 0),
                 'similarity': stats.get('identity', 0),
                 'original_length': len(chr_seq),
                 'repaired_length': len(merged_seq),
                 'extension': stats.get('extension', 0),
-                'attempt_number': i + 1,
+                'attempt_number': i,
                 'total_attempts': len(repair_sequences),
                 'sequence_length': len(repair_info['sequence']),
                 'minimap2_info': {
@@ -1078,60 +1091,57 @@ def try_repair_chromosome(chr_id: str, chr_seq: str,
                     'score': stats.get('score', 0),
                 },
                 'merge_method': stats.get('method', 'unknown'),
-                'cut_positions': stats.get('cut_positions', {}),
-                'telomere_before': stats.get('telomere_before', {}),
                 'telomere_after': tel_after,
                 'telomere_comparison': stats.get('telomere_comparison', {}),
                 'merged_sequence': merged_seq,
+                'repair_info': repair_info,
                 'stats': stats
             }
             
-            # add to restored list
             telomere_restored.append({
                 'merged_seq': merged_seq,
                 'stats': stats,
                 'result_info': result_info,
                 'repair_info': repair_info,
-                'rank': i + 1,
+                'rank': i,
                 'telomere_length': tel_after.get('total_telomere_length', 0),
                 'max_repeats': tel_after.get('max_repeats', 0)
             })
             
-            # add to candidates list for display
             all_candidates.append({
-                'rank': i + 1,
-                'repair_id_full': repair_info['id'],
+                'rank': i,
                 'repair_id': repair_info['id'][:40] + "..." if len(repair_info['id']) > 40 else repair_info['id'],
-                'repair_type': repair_info.get('repair_type', 'unknown'),
+                'repair_id_full': repair_info['id'],
+                'repair_type': target_end,
                 'overlap_length': stats.get('overlap_len', 0),
-                'similarity': f"{stats.get('identity', 0):.3f}",
+                'similarity': f"{stats.get('identity', 0):.4f}",
                 'mapq': stats.get('mapq', 0),
                 'extension': stats.get('extension', 0),
-                'telomere_before': 'NO',  # by assumption
+                'telomere_before': 'NO',
                 'telomere_after': 'YES',
                 'telomere_status': 'RESTORED',
                 'telomere_length': tel_after.get('total_telomere_length', 0),
                 'telomere_type': tel_after.get('telomere_type', 'unknown'),
-                'selected': False
+                'selected': False,
+                'end': target_end
             })
             
-            printv(f"    ✓ TELOMERES RESTORED: {tel_after.get('total_telomere_length', 0):,}bp, {tel_after.get('max_repeats', 0)} repeats")
+            printv(f"        ✓ Telomere restored for {target_end} end")
             
         except TelomereNotRestoredError as e:
-            # merged but no telomeres
-            printv(f"    ✗ Failed: {e}")
+            printv(f"        ✗ Failed: {e}")
             failed_attempts.append({
                 'repair_info': repair_info,
                 'reason': str(e),
-                'rank': i + 1
+                'rank': i
             })
-            
             all_candidates.append({
-                'rank': i + 1,
+                'rank': i,
                 'repair_id': repair_info['id'][:40] + "..." if len(repair_info['id']) > 40 else repair_info['id'],
-                'repair_type': repair_info.get('repair_type', 'unknown'),
+                'repair_id_full': repair_info['id'],
+                'repair_type': target_end,
                 'overlap_length': 0,
-                'similarity': '0.000',
+                'similarity': '0.0000',
                 'mapq': 0,
                 'extension': 0,
                 'telomere_before': 'NO',
@@ -1140,24 +1150,24 @@ def try_repair_chromosome(chr_id: str, chr_seq: str,
                 'telomere_length': 0,
                 'telomere_type': 'unknown',
                 'selected': False,
-                'error': str(e)
+                'error': str(e),
+                'end': target_end
             })
             
         except (NoOverlapError, LowQualityError) as e:
-            # couldn't even merge
-            printv(f"    ✗ Failed: {e}")
+            printv(f"        ✗ Failed: {e}")
             failed_attempts.append({
                 'repair_info': repair_info,
                 'reason': str(e),
-                'rank': i + 1
+                'rank': i
             })
-            
             all_candidates.append({
-                'rank': i + 1,
+                'rank': i,
                 'repair_id': repair_info['id'][:40] + "..." if len(repair_info['id']) > 40 else repair_info['id'],
-                'repair_type': repair_info.get('repair_type', 'unknown'),
+                'repair_id_full': repair_info['id'],
+                'repair_type': target_end,
                 'overlap_length': 0,
-                'similarity': '0.000',
+                'similarity': '0.0000',
                 'mapq': 0,
                 'extension': 0,
                 'telomere_before': 'NO',
@@ -1166,87 +1176,244 @@ def try_repair_chromosome(chr_id: str, chr_seq: str,
                 'telomere_length': 0,
                 'telomere_type': 'unknown',
                 'selected': False,
-                'error': str(e)
+                'error': str(e),
+                'end': target_end
             })
     
-    # sort candidates by rank
-    all_candidates.sort(key=lambda x: x['rank'])
-    
-    # PRIORITY: choose from telomere-restored sequences
     if telomere_restored:
-        printv(f"\n  Found {len(telomere_restored)} sequences that restore telomeres")
-        
-        # This ensures longer overlaps are preferred for more reliable fusion
+        # Sort by quality
         telomere_restored.sort(key=lambda x: (
-            x['result_info'].get('overlap_length', 0),  # 优先重叠长度
-            x['telomere_length'],                         # 其次端粒长度
-            x['max_repeats']                               # 最后端粒重复数
+            x['result_info'].get('overlap_length', 0),
+            x['telomere_length'],
+            x['max_repeats']
         ), reverse=True)
-
-
-        # show top candidates
-        for rank, item in enumerate(telomere_restored[:3]):
-            printv(f"    {rank+1}. Length: {item['telomere_length']:,}bp, Repeats: {item['max_repeats']}")
         
-        # select best
-        best_item = telomere_restored[0]
-        best_item['result_info']['telomere_success'] = True
+        best = telomere_restored[0]
+        best['result_info']['telomere_success'] = True
+        best['result_info']['selected_for_end'] = target_end
         
-
-        best_repair_id = best_item['repair_info']['id']
+        # Mark selected
+        best_repair_id = best['repair_info']['id']
         for candidate in all_candidates:
-            candidate_id = candidate.get('repair_id_full', candidate['repair_id'])
-            if best_repair_id in candidate_id or candidate_id in best_repair_id:
+            if candidate.get('repair_id_full', candidate['repair_id']) == best_repair_id or \
+               best_repair_id in candidate.get('repair_id', ''):
                 candidate['selected'] = True
-                printv(f"    Selected candidate: {best_repair_id[:60]}...")
-                break
         
-        return best_item['merged_seq'], best_item['result_info'], best_item['repair_info'], all_candidates
-    
+        printv(f"\n      Selected best for {target_end} end:")
+        printv(f"        ID: {best['repair_info']['id'][:60]}...")
+        printv(f"        Overlap: {best['result_info']['overlap_length']:,} bp")
+        printv(f"        Similarity: {best['result_info']['similarity']:.4f}")
+        printv(f"        Telomere: {best['telomere_length']:,} bp")
+        
+        return best['result_info'], best['merged_seq'], all_candidates
     else:
-        # No telomeres restored
-        printv(f"\n  WARNING: No sequences restore telomeres!")
-        printv(f"  Chromosome {chr_id} will not be repaired")
+        return None, None, all_candidates
+
+
+def try_repair_chromosome_dual(
+    chr_id: str, 
+    chr_seq: str, 
+    repair_sequences: List[Dict],
+    config: Dict
+) -> Tuple[Optional[str], Dict, Dict, List[Dict]]:
+    """
+    Try to repair both ends of chromosome separately
+    Returns: (merged_seq, result_info, used_repair_info, all_candidates)
+    """
+    printv(f"\n{'='*60}")
+    printv(f"Processing chromosome: {chr_id} (DUAL-END REPAIR - HIGH STRINGENCY)")
+    printv(f"  Length: {len(chr_seq):,} bp")
+    printv(f"  Candidates: {len(repair_sequences)} sequences")
+    printv(f"  Minimum similarity: {config.get('min_similarity', 0.99)}")
+    printv(f"  Minimum overlap: {config.get('min_overlap_length', 3000):,} bp")
+    printv(f"{'='*60}")
+    
+    # Store original sequence for statistics
+    original_seq = chr_seq
+    
+    # Separate sequences by type
+    five_prime_seqs = []
+    three_prime_seqs = []
+    unknown_seqs = []
+    
+    for seq_info in repair_sequences:
+        repair_type = seq_info.get('repair_type', 'unknown')
+        if repair_type == '5prime':
+            five_prime_seqs.append(seq_info)
+        elif repair_type == '3prime':
+            three_prime_seqs.append(seq_info)
+        else:
+            unknown_seqs.append(seq_info)
+    
+    printv(f"\n  Sequences by type:")
+    printv(f"    5' end: {len(five_prime_seqs)} sequences")
+    printv(f"    3' end: {len(three_prime_seqs)} sequences")
+    printv(f"    Unknown: {len(unknown_seqs)} sequences")
+    
+    repairer = TelomereRepair(config)
+    
+    # Results storage
+    five_prime_result = None
+    three_prime_result = None
+    all_candidates = []
+    
+    # Track if each end was repaired
+    five_prime_repaired = False
+    three_prime_repaired = False
+    
+    # Current sequence (updated after each repair)
+    current_seq = chr_seq
+    
+    # 1. Try to repair 5' end
+    if five_prime_seqs:
+        printv(f"\n{'-'*50}")
+        printv(f"Attempting 5' END REPAIR (High Stringency)")
+        printv(f"{'-'*50}")
         
-        result_info = {
-            'chromosome': chr_id,
-            'repair_id': 'none',
-            'reason': 'no_telomere_restored',
-            'attempts': len(repair_sequences),
-            'failed_attempts': failed_attempts
-        }
+        five_prime_result, five_prime_merged, five_prime_candidates = try_repair_single_end(
+            chr_id, current_seq, five_prime_seqs, repairer, '5prime'
+        )
         
+        if five_prime_result and five_prime_merged:
+            five_prime_repaired = True
+            all_candidates.extend(five_prime_candidates)
+            current_seq = five_prime_merged
+            printv(f"  ✓ 5' end repaired successfully")
+        else:
+            printv(f"  ✗ 5' end repair failed")
+            if five_prime_candidates:
+                all_candidates.extend(five_prime_candidates)
+    
+    # 2. Try to repair 3' end (using updated sequence)
+    if three_prime_seqs:
+        printv(f"\n{'-'*50}")
+        printv(f"Attempting 3' END REPAIR (High Stringency)")
+        printv(f"{'-'*50}")
+        
+        three_prime_result, three_prime_merged, three_prime_candidates = try_repair_single_end(
+            chr_id, current_seq, three_prime_seqs, repairer, '3prime'
+        )
+        
+        if three_prime_result and three_prime_merged:
+            three_prime_repaired = True
+            all_candidates.extend(three_prime_candidates)
+            current_seq = three_prime_merged
+            printv(f"  ✓ 3' end repaired successfully")
+        else:
+            printv(f"  ✗ 3' end repair failed")
+            if three_prime_candidates:
+                all_candidates.extend(three_prime_candidates)
+    
+    # 3. Handle unknown sequences (try on ends that still need repair)
+    if unknown_seqs:
+        printv(f"\n{'-'*50}")
+        printv(f"Attempting repair with unknown-type sequences")
+        printv(f"{'-'*50}")
+        
+        # Try unknown sequences on the end that still needs repair
+        if not five_prime_repaired:
+            printv(f"\n  Trying unknown sequences on 5' end")
+            unknown_result, unknown_merged, unknown_candidates = try_repair_single_end(
+                chr_id, current_seq, unknown_seqs, repairer, '5prime'
+            )
+            if unknown_result and unknown_merged:
+                five_prime_repaired = True
+                current_seq = unknown_merged
+                all_candidates.extend(unknown_candidates)
+                printv(f"  ✓ 5' end repaired with unknown sequence")
+            else:
+                if unknown_candidates:
+                    all_candidates.extend(unknown_candidates)
+        
+        if not three_prime_repaired:
+            printv(f"\n  Trying unknown sequences on 3' end")
+            unknown_result, unknown_merged, unknown_candidates = try_repair_single_end(
+                chr_id, current_seq, unknown_seqs, repairer, '3prime'
+            )
+            if unknown_result and unknown_merged:
+                three_prime_repaired = True
+                current_seq = unknown_merged
+                all_candidates.extend(unknown_candidates)
+                printv(f"  ✓ 3' end repaired with unknown sequence")
+            else:
+                if unknown_candidates:
+                    all_candidates.extend(unknown_candidates)
+    
+    # 4. Build final result
+    result_info = {
+        'chromosome': chr_id,
+        'original_length': len(original_seq),
+        'repaired_length': len(current_seq),
+        'five_prime_repaired': five_prime_repaired,
+        'three_prime_repaired': three_prime_repaired,
+        'both_ends_repaired': five_prime_repaired and three_prime_repaired,
+        'five_prime_result': five_prime_result,
+        'three_prime_result': three_prime_result
+    }
+    
+    # Calculate total extension and overlap
+    total_extension = len(current_seq) - len(original_seq)
+    
+    if five_prime_result:
+        result_info['five_prime_overlap'] = five_prime_result.get('overlap_length', 0)
+        result_info['five_prime_extension'] = five_prime_result.get('extension', 0)
+        result_info['five_prime_similarity'] = five_prime_result.get('similarity', 0)
+    
+    if three_prime_result:
+        result_info['three_prime_overlap'] = three_prime_result.get('overlap_length', 0)
+        result_info['three_prime_extension'] = three_prime_result.get('extension', 0)
+        result_info['three_prime_similarity'] = three_prime_result.get('similarity', 0)
+    
+    result_info['total_extension'] = total_extension
+    
+    # Determine which sequences were used
+    used_repair_info = {}
+    if five_prime_result and five_prime_result.get('repair_info'):
+        used_repair_info['5prime'] = five_prime_result['repair_info']['id']
+    if three_prime_result and three_prime_result.get('repair_info'):
+        used_repair_info['3prime'] = three_prime_result['repair_info']['id']
+    
+    # Print summary
+    printv(f"\n{'='*50}")
+    printv(f"REPAIR SUMMARY for {chr_id}:")
+    printv(f"  5' end: {'✓ REPAIRED' if five_prime_repaired else '✗ NOT REPAIRED'}")
+    if five_prime_result:
+        printv(f"    - Overlap: {five_prime_result.get('overlap_length', 0):,} bp")
+        printv(f"    - Similarity: {five_prime_result.get('similarity', 0):.4f}")
+        printv(f"    - Extension: {five_prime_result.get('extension', 0):+,} bp")
+    printv(f"  3' end: {'✓ REPAIRED' if three_prime_repaired else '✗ NOT REPAIRED'}")
+    if three_prime_result:
+        printv(f"    - Overlap: {three_prime_result.get('overlap_length', 0):,} bp")
+        printv(f"    - Similarity: {three_prime_result.get('similarity', 0):.4f}")
+        printv(f"    - Extension: {three_prime_result.get('extension', 0):+,} bp")
+    printv(f"  Total extension: {total_extension:+,} bp")
+    printv(f"{'='*50}")
+    
+    if five_prime_repaired or three_prime_repaired:
+        return current_seq, result_info, used_repair_info, all_candidates
+    else:
         return None, result_info, None, all_candidates
+
+
+def try_repair_chromosome(chr_id: str, chr_seq: str, 
+                         repair_sequences: List[Dict],
+                         config: Dict) -> Tuple[Optional[str], Dict, Dict, List[Dict]]:
+    """
+    Wrapper function - calls the dual-end repair version
+    """
+    return try_repair_chromosome_dual(chr_id, chr_seq, repair_sequences, config)
 
 
 def write_tabular_report(report_file: str, results: Dict, all_candidates_by_chr: Dict[str, List[Dict]], 
                          genome_file: str, repair_file: str, params: Dict):
     """
-    Write report in tabular format for clear visualization
-    FIXED: Properly handles results dictionary structure
+    Write report in tabular format for clear visualization with dual-end support
     """
-    # Validate and fix results structure
-    if not isinstance(results, dict):
-        print(f"Warning: results is not a dict, it's {type(results)}")
-        results = {}
-    
-    # Ensure results contains the expected structure
-    if 'results' not in results:
-        results['results'] = {'success': [], 'failed': [], 'skipped': []}
-    
-    # Ensure success/failed/skipped are lists
-    for key in ['success', 'failed', 'skipped']:
-        if key not in results['results']:
-            results['results'][key] = []
-        elif not isinstance(results['results'][key], list):
-            print(f"Warning: results['results']['{key}'] is not a list, it's {type(results['results'][key])}")
-            results['results'][key] = []
-    
     with open(report_file, 'w') as f:
         # Header
-        f.write("=" * 100 + "\n")
-        f.write("TELOMERE REPAIR SEQUENCE MERGE REPORT (TELOMERE-FIRST VERSION)\n")
-        f.write("=" * 100 + "\n\n")
+        f.write("=" * 120 + "\n")
+        f.write("TELOMERE REPAIR SEQUENCE MERGE REPORT (DUAL-END REPAIR - HIGH STRINGENCY VERSION)\n")
+        f.write("=" * 120 + "\n\n")
         
         # Parameters
         f.write("PARAMETERS:\n")
@@ -1256,6 +1423,7 @@ def write_tabular_report(report_file: str, results: Dict, all_candidates_by_chr:
         f.write(f"Output directory:       {params['output_dir']}\n")
         f.write(f"Search range:           {params['search_range']:,} bp\n")
         f.write(f"Minimum similarity:     {params['min_similarity']}\n")
+        f.write(f"Minimum overlap length: {params.get('min_overlap', 3000)} bp\n")
         f.write(f"Minimap2 mode:          {params['minimap2_mode']}\n")
         f.write(f"Min match length:       {params['min_match_length']} bp\n")
         f.write(f"Min MAPQ:               {params['min_mapq']}\n")
@@ -1263,7 +1431,7 @@ def write_tabular_report(report_file: str, results: Dict, all_candidates_by_chr:
         f.write(f"Organism:               {params['organism']}\n")
         f.write(f"Processing time:        {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
         
-        # Get statistics safely
+        # Get statistics
         stats = results.get('statistics', {})
         tel_stats = stats.get('telomere_stats', {})
         
@@ -1271,12 +1439,14 @@ def write_tabular_report(report_file: str, results: Dict, all_candidates_by_chr:
         f.write("-" * 50 + "\n")
         f.write(f"Total repair sequences:     {stats.get('total_repair_sequences', 0)}\n")
         f.write(f"Successfully repaired chr:  {stats.get('success_chromosomes', 0)}\n")
+        f.write(f"Both ends repaired:         {stats.get('both_ends_repaired', 0)}\n")
+        f.write(f"Only 5' end repaired:       {stats.get('only_5prime_repaired', 0)}\n")
+        f.write(f"Only 3' end repaired:       {stats.get('only_3prime_repaired', 0)}\n")
         f.write(f"Failed sequences:           {stats.get('failed_sequences', 0)}\n")
         f.write(f"Skipped sequences:          {stats.get('skipped_sequences', 0)}\n\n")
         
         f.write("TELOMERE STATUS:\n")
-        f.write(f"  RESTORED:  {tel_stats.get('restored', 0):3d}  (was absent, now present)\n")
-        f.write(f"  FAILED:    {stats.get('failed_sequences', 0):3d}  (no telomeres restored)\n\n")
+        f.write(f"  RESTORED:  {tel_stats.get('restored', 0):3d}  (telomeres restored)\n\n")
         
         f.write(f"Total extension length: {stats.get('total_extension', 0):,} bp\n")
         f.write(f"Average extension:      {stats.get('avg_extension', 0):,.0f} bp\n")
@@ -1285,115 +1455,142 @@ def write_tabular_report(report_file: str, results: Dict, all_candidates_by_chr:
         
         # Detailed results for each chromosome
         for chr_name, candidates in all_candidates_by_chr.items():
-            f.write("=" * 100 + "\n")
+            f.write("=" * 120 + "\n")
             f.write(f"CHROMOSOME: {chr_name}\n")
-            f.write("=" * 100 + "\n")
+            f.write("=" * 120 + "\n")
             
-            # Find which candidate was selected
-            selected_id = None
-            for candidate in candidates:
-                if candidate.get('selected', False):
-                    selected_id = candidate['repair_id']
-                    break
+            # Separate candidates by end type
+            five_prime_candidates = [c for c in candidates if c.get('end') == '5prime' or c.get('repair_type') == '5prime']
+            three_prime_candidates = [c for c in candidates if c.get('end') == '3prime' or c.get('repair_type') == '3prime']
             
-            # Table header
-            f.write("\n")
-            f.write("{:<4} {:<45} {:<8} {:>10} {:>8} {:>6} {:>10} {:>12} {:>12} {:>12} {:>10} {:<8}\n".format(
-                "Rank", "Repair Sequence ID", "Type", "Overlap", "Sim", "MAPQ", 
-                "Extension", "Tel Before", "Tel After", "Tel Status", "Tel Length", "Selected"
-            ))
-            f.write("-" * 160 + "\n")
-            
-            # Table rows
-            for candidate in sorted(candidates, key=lambda x: x['rank']):
-                selected_mark = "→ SELECTED" if candidate.get('selected', False) else ""
-                
-                tel_before = candidate.get('telomere_before', 'NO')
-                tel_after = candidate.get('telomere_after', 'NO')
-                tel_status = candidate.get('telomere_status', 'UNKNOWN')
-                tel_length = candidate.get('telomere_length', 0)
-                tel_type = candidate.get('telomere_type', '')
-                
-                # Add telomere type to status if present
-                if tel_after == 'YES' and tel_type != 'unknown':
-                    tel_display = f"{tel_after} ({tel_type})"
-                else:
-                    tel_display = tel_after
-                
-                # Truncate long IDs
-                repair_id = candidate['repair_id']
-                if len(repair_id) > 42:
-                    repair_id = repair_id[:39] + "..."
-                
-                f.write("{:<4} {:<45} {:<8} {:>10} {:>8} {:>6} {:>10} {:>12} {:>12} {:>12} {:>10} {:<8}\n".format(
-                    candidate['rank'],
-                    repair_id,
-                    candidate.get('repair_type', 'unknown'),
-                    f"{candidate.get('overlap_length', 0):,}",
-                    candidate.get('similarity', '0.000'),
-                    candidate.get('mapq', 0),
-                    f"{candidate.get('extension', 0):+,}",
-                    tel_before,
-                    tel_display,
-                    tel_status,
-                    f"{tel_length:,}",
-                    selected_mark
+            # Display 5' end results
+            if five_prime_candidates:
+                f.write("\n5' END REPAIR RESULTS:\n")
+                f.write("-" * 110 + "\n")
+                f.write("{:<4} {:<45} {:>10} {:>10} {:>6} {:>10} {:>12} {:>12} {:<8}\n".format(
+                    "Rank", "Repair Sequence ID", "Overlap", "Similarity", "MAPQ", 
+                    "Extension", "Tel After", "Tel Status", "Selected"
                 ))
+                f.write("-" * 110 + "\n")
                 
-                # Show error if failed
-                if 'error' in candidate:
-                    f.write(f"      └─ ERROR: {candidate['error']}\n")
+                for candidate in sorted(five_prime_candidates, key=lambda x: x['rank']):
+                    selected_mark = "→ SELECTED" if candidate.get('selected', False) else ""
+                    tel_after = candidate.get('telomere_after', 'NO')
+                    tel_status = candidate.get('telomere_status', 'UNKNOWN')
+                    
+                    repair_id = candidate['repair_id']
+                    if len(repair_id) > 42:
+                        repair_id = repair_id[:39] + "..."
+                    
+                    f.write("{:<4} {:<45} {:>10} {:>10} {:>6} {:>10} {:>12} {:>12} {:<8}\n".format(
+                        candidate['rank'],
+                        repair_id,
+                        f"{candidate.get('overlap_length', 0):,}",
+                        candidate.get('similarity', '0.0000'),
+                        candidate.get('mapq', 0),
+                        f"{candidate.get('extension', 0):+,}",
+                        tel_after,
+                        tel_status,
+                        selected_mark
+                    ))
+            
+            # Display 3' end results
+            if three_prime_candidates:
+                f.write("\n3' END REPAIR RESULTS:\n")
+                f.write("-" * 110 + "\n")
+                f.write("{:<4} {:<45} {:>10} {:>10} {:>6} {:>10} {:>12} {:>12} {:<8}\n".format(
+                    "Rank", "Repair Sequence ID", "Overlap", "Similarity", "MAPQ", 
+                    "Extension", "Tel After", "Tel Status", "Selected"
+                ))
+                f.write("-" * 110 + "\n")
+                
+                for candidate in sorted(three_prime_candidates, key=lambda x: x['rank']):
+                    selected_mark = "→ SELECTED" if candidate.get('selected', False) else ""
+                    tel_after = candidate.get('telomere_after', 'NO')
+                    tel_status = candidate.get('telomere_status', 'UNKNOWN')
+                    
+                    repair_id = candidate['repair_id']
+                    if len(repair_id) > 42:
+                        repair_id = repair_id[:39] + "..."
+                    
+                    f.write("{:<4} {:<45} {:>10} {:>10} {:>6} {:>10} {:>12} {:>12} {:<8}\n".format(
+                        candidate['rank'],
+                        repair_id,
+                        f"{candidate.get('overlap_length', 0):,}",
+                        candidate.get('similarity', '0.0000'),
+                        candidate.get('mapq', 0),
+                        f"{candidate.get('extension', 0):+,}",
+                        tel_after,
+                        tel_status,
+                        selected_mark
+                    ))
             
             f.write("\n")
             
-            # Additional details for selected candidate
-            if selected_id:
-                # Find the selected result in results['success']
-                success_list = results.get('results', {}).get('success', [])
-                if isinstance(success_list, list):
-                    for result in success_list:
-                        if isinstance(result, dict) and result.get('repair_id', '') in selected_id:
-                            f.write("SELECTED CANDIDATE DETAILS:\n")
-                            f.write("-" * 50 + "\n")
-                            f.write(f"  Merge method:          {result.get('merge_method', 'unknown')}\n")
-                            f.write(f"  Original length:       {result.get('original_length', 0):,} bp\n")
-                            f.write(f"  Repaired length:       {result.get('repaired_length', 0):,} bp\n")
-                            
-                            # Telomere details
-                            tel_after = result.get('telomere_after', {})
-                            if tel_after.get('has_telomere', False):
-                                f.write(f"  Telomere details:\n")
-                                f.write(f"    - Total length:      {tel_after.get('total_telomere_length', 0):,} bp\n")
-                                f.write(f"    - Max repeats:       {tel_after.get('max_repeats', 0)}\n")
-                                f.write(f"    - Telomere count:    {tel_after.get('telomere_count', 0)}\n")
-                                f.write(f"    - Telomere type:     {tel_after.get('telomere_type', 'unknown')}\n")
-                            
-                            break
-                
-                f.write("\n")
+            # Summary for this chromosome
+            five_selected = any(c.get('selected', False) for c in five_prime_candidates)
+            three_selected = any(c.get('selected', False) for c in three_prime_candidates)
+            
+            if five_selected and three_selected:
+                f.write("✓ BOTH ENDS REPAIRED SUCCESSFULLY\n")
+            elif five_selected:
+                f.write("⚠ ONLY 5' END REPAIRED (3' end still missing)\n")
+            elif three_selected:
+                f.write("⚠ ONLY 3' END REPAIRED (5' end still missing)\n")
+            else:
+                f.write("✗ NO ENDS REPAIRED\n")
+            
+            # Additional details for selected candidates
+            if five_selected:
+                for candidate in five_prime_candidates:
+                    if candidate.get('selected', False):
+                        f.write(f"\nSELECTED 5' END CANDIDATE DETAILS:\n")
+                        f.write("-" * 50 + "\n")
+                        f.write(f"  Sequence ID:        {candidate.get('repair_id_full', candidate['repair_id'])}\n")
+                        f.write(f"  Overlap length:     {candidate.get('overlap_length', 0):,} bp\n")
+                        f.write(f"  Similarity:         {candidate.get('similarity', '0.0000')}\n")
+                        f.write(f"  MAPQ:               {candidate.get('mapq', 0)}\n")
+                        f.write(f"  Extension:          {candidate.get('extension', 0):+,} bp\n")
+                        f.write(f"  Telomere length:    {candidate.get('telomere_length', 0):,} bp\n")
+                        f.write(f"  Telomere type:      {candidate.get('telomere_type', 'unknown')}\n")
+                        break
+            
+            if three_selected:
+                for candidate in three_prime_candidates:
+                    if candidate.get('selected', False):
+                        f.write(f"\nSELECTED 3' END CANDIDATE DETAILS:\n")
+                        f.write("-" * 50 + "\n")
+                        f.write(f"  Sequence ID:        {candidate.get('repair_id_full', candidate['repair_id'])}\n")
+                        f.write(f"  Overlap length:     {candidate.get('overlap_length', 0):,} bp\n")
+                        f.write(f"  Similarity:         {candidate.get('similarity', '0.0000')}\n")
+                        f.write(f"  MAPQ:               {candidate.get('mapq', 0)}\n")
+                        f.write(f"  Extension:          {candidate.get('extension', 0):+,} bp\n")
+                        f.write(f"  Telomere length:    {candidate.get('telomere_length', 0):,} bp\n")
+                        f.write(f"  Telomere type:      {candidate.get('telomere_type', 'unknown')}\n")
+                        break
+            
+            f.write("\n")
         
         # Failed sequences summary
         failed_list = results.get('results', {}).get('failed', [])
         if failed_list and isinstance(failed_list, list):
-            f.write("=" * 100 + "\n")
+            f.write("=" * 120 + "\n")
             f.write("FAILED SEQUENCES\n")
-            f.write("=" * 100 + "\n\n")
+            f.write("=" * 120 + "\n\n")
             
-            f.write("FAILED SEQUENCES:\n")
-            f.write("-" * 50 + "\n")
             for fail in failed_list:
                 if isinstance(fail, dict) and fail.get('repair_id') != 'none':
                     f.write(f"  {fail.get('repair_id', 'unknown')}: {fail.get('reason', 'unknown')}\n")
             f.write("\n")
         
         # Footer
-        f.write("=" * 100 + "\n")
+        f.write("=" * 120 + "\n")
         f.write("END OF REPORT\n")
-        f.write("=" * 100 + "\n")
+        f.write("=" * 120 + "\n")
 
 
 # ============================================================================
-# Main function - Modified with organism parameter
+# Main function - Modified with high stringency parameters and dual-end repair
 # ============================================================================
 
 def merge_telomere_sequences(
@@ -1401,13 +1598,14 @@ def merge_telomere_sequences(
     repair_file: str,
     output_dir: str,
     search_range: int = 5000000,
-    min_similarity: float = 0.7,
+    min_similarity: float = 0.99,
+    min_overlap_length: int = 3000,
     verbose: bool = False,
     minimap2_mode: str = 'asm5',
-    min_match_length: int = 100,
+    min_match_length: int = 3000,
     min_mapq: int = 20,
     min_telomere_repeats: int = 20,
-    organism: str = 'plant'  # default to plant
+    organism: str = 'plant'
 ) -> Dict[str, Any]:
     
     global VERBOSE
@@ -1432,13 +1630,14 @@ def merge_telomere_sequences(
         
         if verbose:
             print("\n" + "="*70)
-            print("Telomere Repair Sequence Merge Script (Telomere-First Version)")
+            print("Telomere Repair Sequence Merge Script (DUAL-END REPAIR - HIGH STRINGENCY Version)")
             print("="*70)
             print(f"Genome file: {genome_file}")
             print(f"Repair sequence file: {repair_file}")
             print(f"Output directory: {output_dir}")
             print(f"Search range: {search_range:,} bp")
             print(f"Minimum similarity: {min_similarity}")
+            print(f"Minimum overlap length: {min_overlap_length:,} bp")
             print(f"minimap2 mode: {minimap2_mode}")
             print(f"Minimum match length: {min_match_length}")
             print(f"Minimum MAPQ: {min_mapq}")
@@ -1476,6 +1675,8 @@ def merge_telomere_sequences(
             'min_mapq': min_mapq,
             'search_range': search_range,
             'min_telomere_repeats': min_telomere_repeats,
+            'min_overlap_length': min_overlap_length,
+            'min_similarity': min_similarity,
             'organism': organism
         }
         
@@ -1485,6 +1686,11 @@ def merge_telomere_sequences(
         
         # Store all candidates for tabular report
         all_candidates_by_chr = {}
+        
+        # Statistics for dual-end repair
+        both_ends_repaired = 0
+        only_5prime_repaired = 0
+        only_3prime_repaired = 0
         
         for target_chr, repair_sequences in chromosome_groups.items():
             if not repair_sequences:
@@ -1522,22 +1728,40 @@ def merge_telomere_sequences(
             # Store candidates for tabular report
             all_candidates_by_chr[chr_id] = candidates
             
+            # Update dual-end repair statistics
+            if result_info.get('both_ends_repaired', False):
+                both_ends_repaired += 1
+            elif result_info.get('five_prime_repaired', False):
+                only_5prime_repaired += 1
+            elif result_info.get('three_prime_repaired', False):
+                only_3prime_repaired += 1
+            
             if merged_seq:
                 repaired_chromosomes[chr_id] = merged_seq
                 results['success'].append(result_info)
                 
-                if used_repair_info:
-                    used_repair_ids.add(used_repair_info['id'])
+                # Record used repair IDs
+                if isinstance(used_repair_info, dict):
+                    for end_type, repair_id in used_repair_info.items():
+                        if repair_id:
+                            used_repair_ids.add(repair_id)
+                elif used_repair_info and isinstance(used_repair_info, str):
+                    used_repair_ids.add(used_repair_info)
                 
                 # mark skipped alternative sequences
                 for repair_info in repair_sequences:
-                    if repair_info['id'] != used_repair_info['id']:
+                    repair_id = repair_info['id']
+                    is_used = False
+                    if isinstance(used_repair_info, dict):
+                        is_used = repair_id in used_repair_info.values()
+                    else:
+                        is_used = repair_id == used_repair_info
+                    
+                    if not is_used:
                         results['skipped'].append({
-                            'repair_id': repair_info['id'],
+                            'repair_id': repair_id,
                             'reason': 'not_used_alternative',
-                            'chromosome': chr_id,
-                            'used_repair': used_repair_info['id'],
-                            'sequence_length': repair_info['length']
+                            'chromosome': chr_id
                         })
             else:
                 results['failed'].append(result_info)
@@ -1578,7 +1802,7 @@ def merge_telomere_sequences(
                 record = SeqRecord(
                     Seq(repaired_seq),
                     id=chr_id,
-                    description=f"repaired|organism:{organism}|original_{len(seq)}bp|repaired_{len(repaired_seq)}bp"
+                    description=f"repaired|organism:{organism}|stringency:high|similarity:{min_similarity}|overlap:{min_overlap_length}|original_{len(seq)}bp|repaired_{len(repaired_seq)}bp"
                 )
                 repaired_records.append(record)
             else:
@@ -1601,17 +1825,6 @@ def merge_telomere_sequences(
         
         # generate enhanced tabular report
         try:
-            params = {
-                'output_dir': output_dir,
-                'search_range': search_range,
-                'min_similarity': min_similarity,
-                'minimap2_mode': minimap2_mode,
-                'min_match_length': min_match_length,
-                'min_mapq': min_mapq,
-                'min_telomere_repeats': min_telomere_repeats,
-                'organism': organism
-            }
-            
             # Calculate statistics
             success_list = results.get('success', [])
             if not isinstance(success_list, list):
@@ -1625,7 +1838,7 @@ def merge_telomere_sequences(
             if not isinstance(skipped_list, list):
                 skipped_list = []
             
-            success_chromosomes = len([r for r in success_list if isinstance(r, dict) and 'attempt_number' in r])
+            success_chromosomes = len([r for r in success_list if isinstance(r, dict) and 'chromosome' in r])
             
             total_extension = 0
             total_overlap = 0
@@ -1635,26 +1848,44 @@ def merge_telomere_sequences(
                 for r in success_list:
                     if not isinstance(r, dict):
                         continue
-                    if 'extension' in r:
-                        total_extension += r.get('extension', 0)
-                    if 'overlap_length' in r:
-                        total_overlap += r.get('overlap_length', 0)
+                    if 'total_extension' in r:
+                        total_extension += r.get('total_extension', 0)
+                    if 'five_prime_overlap' in r:
+                        total_overlap += r.get('five_prime_overlap', 0)
+                    if 'three_prime_overlap' in r:
+                        total_overlap += r.get('three_prime_overlap', 0)
                     
-                    tel_status = r.get('telomere_comparison', {}).get('status', '')
-                    if tel_status == 'RESTORED':
+                    if r.get('five_prime_repaired', False):
+                        restored_count += 1
+                    if r.get('three_prime_repaired', False):
                         restored_count += 1
             
             avg_extension = total_extension / success_chromosomes if success_chromosomes > 0 else 0
-            avg_overlap = total_overlap / success_chromosomes if success_chromosomes > 0 else 0
+            avg_overlap = total_overlap / (success_chromosomes * 2) if success_chromosomes > 0 else 0
+            
+            params = {
+                'output_dir': output_dir,
+                'search_range': search_range,
+                'min_similarity': min_similarity,
+                'min_overlap': min_overlap_length,
+                'minimap2_mode': minimap2_mode,
+                'min_match_length': min_match_length,
+                'min_mapq': min_mapq,
+                'min_telomere_repeats': min_telomere_repeats,
+                'organism': organism
+            }
             
             result_dict = {
                 'success': True,
                 'repaired_genome': repaired_file,
                 'report_file': report_file,
-                'results': results,  # contains 'success', 'failed', 'skipped'
+                'results': results,
                 'statistics': {
                     'total_repair_sequences': len(repair_records),
                     'success_chromosomes': success_chromosomes,
+                    'both_ends_repaired': both_ends_repaired,
+                    'only_5prime_repaired': only_5prime_repaired,
+                    'only_3prime_repaired': only_3prime_repaired,
                     'failed_sequences': len([f for f in failed_list if isinstance(f, dict) and f.get('reason') == 'no_telomere_restored']),
                     'skipped_sequences': len(skipped_list),
                     'total_extension': total_extension,
@@ -1688,7 +1919,10 @@ def merge_telomere_sequences(
             print("Processing completed!")
             print("="*70)
             print(f"Successfully repaired: {success_chromosomes} chromosomes")
-            print(f"  Telomere status: {restored_count} RESTORED")
+            print(f"  Both ends repaired: {both_ends_repaired}")
+            print(f"  Only 5' end: {only_5prime_repaired}")
+            print(f"  Only 3' end: {only_3prime_repaired}")
+            print(f"Telomere status: {restored_count} ends restored")
             print(f"Repair failed: {len(failed_list)} sequences")
             print(f"Skipped: {len(skipped_list)} sequences")
             print(f"Total time: {total_time:.2f} seconds")
@@ -1721,21 +1955,25 @@ def merge_telomere_sequences(
 
 def parse_command_line_args():
     parser = argparse.ArgumentParser(
-        description="Telomere Repair Sequence Merge Script (Telomere-First Version) - Plant Telomere Support with Tabular Report",
+        description="Telomere Repair Sequence Merge Script (Dual-End Repair - High Stringency Version) - Plant Telomere Support with Tabular Report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
-        Core Logic: PRIORITIZE SEQUENCES THAT RESTORE TELOMERES
+        Core Logic: REPAIR BOTH ENDS SEPARATELY, PRIORITIZE SEQUENCES THAT RESTORE TELOMERES
+        HIGH STRINGENCY: Minimum similarity 0.99 (99%), Minimum overlap 3000bp
         
         Features:
-          1. Try ALL candidates, not just first success
-          2. Validate telomeres BEFORE and AFTER repair
-          3. ONLY accept sequences that restore telomeres
-          4. Support for both plant (TTTAGGG) and vertebrate (TTAGGG) telomeres
-          5. Overlap length considered for reliable fusion
-          6. Tabular report format for clear visualization
+          1. Repair 5' and 3' ends independently
+          2. Try ALL candidates for each end
+          3. Validate telomeres BEFORE and AFTER repair
+          4. ONLY accept sequences that restore telomeres
+          5. Support for both plant (TTTAGGG) and vertebrate (TTAGGG) telomeres
+          6. Overlap length considered for reliable fusion
+          7. Tabular report format with separate sections for each end
+          8. HIGH STRINGENCY quality filters (99% similarity, 3000bp overlap)
         
         Usage examples:
-          python add_te.py -q genome.fasta -i repair_sequences.fa -o output_dir --organism plant
+          python add_te_test1.py -q genome.fasta -i repair_sequences.fa -o output_dir --organism plant
+          python add_te_test1.py -q genome.fasta -i repair_sequences.fa -o output_dir --min-similarity 0.99 --min-overlap 3000
         """)
     )
     
@@ -1745,21 +1983,22 @@ def parse_command_line_args():
     
     parser.add_argument("--search-range", type=int, default=5000000,
                        help="Alignment search range(bp) (default: 5,000,000)")
-    parser.add_argument("--min-similarity", type=float, default=0.6,
-                       help="Minimum alignment similarity (default: 0.6)")
+    parser.add_argument("--min-similarity", type=float, default=0.99,
+                       help="Minimum alignment similarity (default: 0.99)")
+    parser.add_argument("--min-overlap", type=int, default=3000,
+                       help="Minimum overlap length for fusion (default: 3000bp)")
     
     parser.add_argument("--minimap2-mode", default='asm5',
                        choices=['asm5', 'asm10', 'asm20', 'map-ont', 'map-pb'],
                        help="minimap2 alignment mode (default: asm5)")
-    parser.add_argument("--min-match-length", type=int, default=100,
-                       help="Minimum match length (default: 100)")
+    parser.add_argument("--min-match-length", type=int, default=3000,
+                       help="Minimum match length (default: 3000)")
     parser.add_argument("--min-mapq", type=int, default=20,
                        help="Minimum mapping quality (default: 20)")
     
     parser.add_argument("--min-telomere-repeats", type=int, default=20,
                        help="Minimum telomere repeats for detection (default: 20)")
     
-    # organism parameter - default to plant
     parser.add_argument("--organism", default='plant',
                        choices=['plant', 'vertebrate', 'auto'],
                        help="Organism type for telomere pattern detection: plant (TTTAGGG), vertebrate (TTAGGG), or auto-detect (default: plant)")
@@ -1779,6 +2018,7 @@ def main():
         output_dir=args.output_dir,
         search_range=args.search_range,
         min_similarity=args.min_similarity,
+        min_overlap_length=args.min_overlap,
         verbose=args.verbose,
         minimap2_mode=args.minimap2_mode,
         min_match_length=args.min_match_length,
@@ -1800,15 +2040,22 @@ def main():
         print("PROCESSING COMPLETED")
         print(f"{'='*50}")
         print(f"Organism: {stats.get('organism', 'plant')}")
+        print(f"High Stringency Settings:")
+        print(f"  Minimum similarity: {args.min_similarity}")
+        print(f"  Minimum overlap: {args.min_overlap:,} bp")
         print(f"Successfully repaired: {stats['success_chromosomes']} chromosomes")
+        print(f"  Both ends repaired: {stats.get('both_ends_repaired', 0)}")
+        print(f"  Only 5' end: {stats.get('only_5prime_repaired', 0)}")
+        print(f"  Only 3' end: {stats.get('only_3prime_repaired', 0)}")
         print(f"\nTelomere Status:")
-        print(f"  RESTORED:  {tel_stats.get('restored', 0):3d}  (was absent, now present)")
+        print(f"  RESTORED:  {tel_stats.get('restored', 0):3d}  ends restored")
         
         if tel_stats.get('restored', 0) > 0:
-            print(f"\n✓ SUCCESS: Telomeres were restored!")
+            print(f"\n✓ SUCCESS: Telomeres were restored with high stringency filters!")
         else:
             print(f"\n⚠ WARNING: No telomeres were restored")
             print(f"   Check if repair sequences actually contain telomere repeats")
+            print(f"   Try lowering stringency with --min-similarity 0.6 --min-overlap 100")
         
         print(f"\nTotal extension length: {stats.get('total_extension', 0):,} bp")
         print(f"Average extension: {stats.get('avg_extension', 0):,.0f} bp")
