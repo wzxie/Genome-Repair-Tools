@@ -2,7 +2,7 @@
 """
 Genome Assembly and Gap Filling Integrated Pipeline - Simplified Version
 Automated pipeline for assembly, gap detection, and filling with quality assessment
-Version: 1.5 (Fixed directory nesting issue)
+Version: 1.5 (Fixed directory nesting issue, KEEP ORIGINAL SEQUENCE NAMES)
 """
 
 import os
@@ -213,7 +213,7 @@ class AssemblyGapFiller:
                                   threads: int = 16, filter_fragments: bool = False,
                                   min_fragment_length: int = 100000) -> Optional[Dict]:
         """Analyze genome using chromosome_analyzer module"""
-        # 使用绝对路径
+        # Use absolute path
         input_fasta_abs = os.path.abspath(input_fasta)
         self.log(f"Analyzing genome: {os.path.basename(input_fasta_abs)}", "INFO")
         
@@ -277,24 +277,24 @@ class AssemblyGapFiller:
     def analyze_and_sort_chromosomes(self, input_fasta: str, 
                                     no_gap_output: str = "0_gap.fa",
                                     with_gap_output: str = "with_gap.fa") -> Tuple[str, str, Dict]:
-        """Analyze FASTA file and sort chromosomes - FIXED PATH ISSUE"""
-        # 确保使用绝对路径
+        """Analyze FASTA file and sort chromosomes - KEEP ORIGINAL SEQUENCE NAMES"""
+        # Ensure absolute path
         input_fasta_abs = os.path.abspath(input_fasta)
         
         self.log(f"Detecting gaps and sorting chromosomes: {os.path.basename(input_fasta_abs)}", "INFO")
         
         try:
-            # 确保输出文件是绝对路径
+            # Ensure output files are absolute paths
             no_gap_output_abs = os.path.abspath(no_gap_output) if no_gap_output else ""
             with_gap_output_abs = os.path.abspath(with_gap_output) if with_gap_output else ""
             
             for output_file in [no_gap_output_abs, with_gap_output_abs]:
-                if output_file:  # 检查是否为空字符串
+                if output_file:  # Check if not empty string
                     output_dir = os.path.dirname(output_file)
                     if output_dir and not os.path.exists(output_dir):
                         os.makedirs(output_dir, exist_ok=True)
             
-            # 确保输入文件存在
+            # Ensure input file exists
             if not os.path.exists(input_fasta_abs):
                 self.log(f"Input file not found: {input_fasta_abs}", "ERROR")
                 return "", "", {}
@@ -309,6 +309,7 @@ class AssemblyGapFiller:
                 sequence = str(record.seq)
                 gaps = self.find_gaps_in_sequence(sequence, 'N', 1)
                 
+                # Keep original record IDs without modification
                 if not gaps:
                     no_gap_records.append(record)
                 else:
@@ -349,60 +350,78 @@ class AssemblyGapFiller:
             return "", "", {}
     
     def simple_split_contigs(self, input_file: str, output_file: str) -> bool:
-        """Simple contig splitting method, avoiding complex processing"""
-        self.log(f"Splitting contigs: {os.path.basename(input_file)}", "INFO")
+        """Simple contig splitting method - KEEP ORIGINAL SEQUENCE NAMES (NO SUFFIXES ADDED)"""
+        self.log(f"Processing contigs file: {os.path.basename(input_file)}", "INFO")
         
         try:
             output_dir = os.path.dirname(output_file)
             if output_dir and not os.path.exists(output_dir):
                 os.makedirs(output_dir, exist_ok=True)
             
-            with open(input_file, 'r') as infile, open(output_file, 'w') as outfile:
-                in_sequence = False
-                current_seq = []
-                seq_count = 0
-                
-                for line in infile:
-                    line = line.strip()
-                    
-                    if line.startswith('>'):
-                        if current_seq:
-                            sequence = ''.join(current_seq)
-                            parts = re.split(r'N{10,}', sequence.upper())  # At least 10 Ns
-                            for i, part in enumerate(parts):
-                                if part and len(part) > 0:
-                                    seq_count += 1
-                                    outfile.write(f">split_{seq_count}\n")
-                                    for j in range(0, len(part), 80):
-                                        outfile.write(part[j:j+80] + "\n")
-                        
-                        # Reset current sequence
-                        current_seq = []
-                    
-                    else:
-                        current_seq.append(line)
-                
-                if current_seq:
-                    sequence = ''.join(current_seq)
-                    parts = re.split(r'N{10,}', sequence.upper())
-                    for i, part in enumerate(parts):
-                        if part and len(part) > 0:
-                            seq_count += 1
-                            outfile.write(f">split_{seq_count}\n")
-                            for j in range(0, len(part), 80):
-                                outfile.write(part[j:j+80] + "\n")
+            # Parse all records
+            records = list(SeqIO.parse(input_file, "fasta"))
             
-            if seq_count > 0:
-                self.log(f"Splitting completed: {seq_count} sequences total", "SUCCESS")
-                return True
-            else:
-                output_dir = os.path.dirname(output_file)
-                if output_dir and not os.path.exists(output_dir):
-                    os.makedirs(output_dir, exist_ok=True)
+            if not records:
+                self.log("No sequences found in input file", "WARN")
                 import shutil
                 shutil.copy2(input_file, output_file)
-                self.log(f"Splitting failed, copying file directly", "WARN")
                 return True
+            
+            # Check if any sequence needs splitting (contains long N runs)
+            needs_splitting = False
+            for record in records:
+                sequence = str(record.seq).upper()
+                if re.search(r'N{10,}', sequence):
+                    needs_splitting = True
+                    break
+            
+            if not needs_splitting:
+                # No splitting needed, just copy
+                import shutil
+                shutil.copy2(input_file, output_file)
+                self.log(f"No splitting needed, file copied directly", "INFO")
+                return True
+            
+            # Need to split sequences
+            self.log(f"Splitting sequences containing long N runs", "INFO")
+            
+            with open(output_file, 'w') as outfile:
+                for record in records:
+                    sequence = str(record.seq).upper()
+                    original_id = record.id
+                    original_desc = record.description
+                    
+                    # Split by long N runs (10+ Ns)
+                    parts = re.split(r'N{10,}', sequence)
+                    valid_parts = [p for p in parts if p and len(p) > 0]
+                    
+                    if len(valid_parts) == 1:
+                        # No splitting needed for this record, keep original
+                        SeqIO.write(record, outfile, "fasta")
+                        self.log(f"  Keeping original: {original_id}", "DEBUG")
+                    else:
+                        # Multiple parts, but we keep the original ID for ALL parts
+                        # This is a compromise - all parts share the same ID
+                        for i, part_seq in enumerate(valid_parts):
+                            # Create new record with SAME ID as original
+                            new_record = SeqRecord(
+                                Seq(part_seq),
+                                id=original_id,  # Keep original ID without suffix
+                                description=f"{original_desc} [part {i+1}]" if original_desc else f"part {i+1} of {original_id}"
+                            )
+                            SeqIO.write(new_record, outfile, "fasta")
+                            self.log(f"  Created part {i+1} with ID: {original_id}", "DEBUG")
+                        
+                        self.log(f"  Split {original_id} into {len(valid_parts)} parts (all with same ID)", "INFO")
+            
+            # Verify output
+            if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                output_count = self.count_contigs(output_file)
+                self.log(f"Processing completed: {output_count} sequences in output", "SUCCESS")
+                return True
+            else:
+                self.log(f"Output file is empty or missing", "ERROR")
+                return False
                 
         except Exception as e:
             self.log(f"Simple splitting failed: {e}", "ERROR")
@@ -465,28 +484,47 @@ class AssemblyGapFiller:
             return None
     
     def merge_contigs_files(self, contig_files: List[str], output_file: str) -> bool:
-        """Merge multiple contigs files"""
+        """Merge multiple contigs files - KEEP ORIGINAL SEQUENCE NAMES, minimal modification"""
         self.log(f"Merging {len(contig_files)} contigs files", "INFO")
         
         try:
             all_records = []
             seen_ids = set()
+            modified_count = 0
             
             for contig_file in contig_files:
-                if os.path.exists(contig_file):
-                    self.log(f"Processing file: {os.path.basename(contig_file)}", "DEBUG")
-                    for record in SeqIO.parse(contig_file, "fasta"):
-                        original_id = record.id
-                        if original_id in seen_ids:
-                            base_id = original_id
-                            counter = 1
-                            while f"{base_id}_{counter}" in seen_ids:
-                                counter += 1
-                            record.id = f"{base_id}_{counter}"
-                            record.description = ""
+                file_name = os.path.basename(contig_file)
+                file_records = list(SeqIO.parse(contig_file, "fasta"))
+                self.log(f"  File {file_name}: {len(file_records)} sequences", "DEBUG")
+                
+                for record in file_records:
+                    original_id = record.id
+                    
+                    # Only modify if ID is EXACTLY duplicate
+                    if original_id in seen_ids:
+                        # Try to find a simple, readable alternative
+                        base_id = original_id
+                        source_hint = os.path.splitext(file_name)[0][:8]  # Short source hint
+                        counter = 1
+                        new_id = f"{base_id}_{source_hint}"
                         
-                        seen_ids.add(record.id)
-                        all_records.append(record)
+                        # Ensure new ID is also unique
+                        while new_id in seen_ids:
+                            counter += 1
+                            new_id = f"{base_id}_{source_hint}_{counter}"
+                        
+                        record.id = new_id
+                        # Keep original description or add note
+                        if record.description:
+                            record.description = f"{record.description} [from {file_name}]"
+                        else:
+                            record.description = f"from {file_name}"
+                        
+                        modified_count += 1
+                        self.log(f"    Renamed duplicate: {original_id} -> {new_id}", "DEBUG")
+                    
+                    seen_ids.add(record.id)
+                    all_records.append(record)
             
             if all_records:
                 output_dir = os.path.dirname(output_file)
@@ -494,7 +532,12 @@ class AssemblyGapFiller:
                     os.makedirs(output_dir, exist_ok=True)
                     
                 SeqIO.write(all_records, output_file, "fasta")
-                self.log(f"Merging completed: {output_file} ({len(all_records)} sequences)", "SUCCESS")
+                
+                if modified_count > 0:
+                    self.log(f"Merging completed: {output_file} ({len(all_records)} sequences, {modified_count} renamed due to conflicts)", "SUCCESS")
+                else:
+                    self.log(f"Merging completed: {output_file} ({len(all_records)} sequences, all original names preserved)", "SUCCESS")
+                
                 return True
             else:
                 self.log("No contig sequences found", "ERROR")
@@ -503,6 +546,102 @@ class AssemblyGapFiller:
         except Exception as e:
             self.log(f"Merging contigs failed: {e}", "ERROR")
             return False
+    
+    def process_contigs_files(self, contigs_files: List[str]) -> List[str]:
+        """Process all contigs files, return processed file list - KEEP ORIGINAL SEQUENCE NAMES"""
+        processed_files = []
+        
+        for i, contig_file in enumerate(contigs_files):
+            if not os.path.exists(contig_file):
+                self.log(f"Contigs file not found: {contig_file}", "ERROR")
+                continue
+            
+            self.log(f"Processing contigs file {i+1}: {os.path.basename(contig_file)}", "INFO")
+            
+            file_size = os.path.getsize(contig_file)
+            if file_size == 0:
+                self.log(f"File is empty: {contig_file}", "WARN")
+                continue
+            
+            # Use new splitting method that preserves original IDs
+            base_name = os.path.basename(contig_file)
+            name_without_ext = os.path.splitext(base_name)[0]
+            processed_file = f"{name_without_ext}_processed_{self.timestamp}.fa"
+            
+            if self.simple_split_contigs(contig_file, processed_file):
+                if os.path.exists(processed_file) and os.path.getsize(processed_file) > 0:
+                    processed_files.append(processed_file)
+                    self.register_temp_file(processed_file)
+                    
+                    # Check if processing changed the file
+                    original_count = self.count_contigs(contig_file)
+                    processed_count = self.count_contigs(processed_file)
+                    if processed_count != original_count:
+                        self.log(f"  Processing changed sequence count: {original_count} → {processed_count}", "INFO")
+                    else:
+                        self.log(f"  Sequence count unchanged: {original_count}", "DEBUG")
+                else:
+                    self.log(f"Processed file invalid: {processed_file}", "WARN")
+            else:
+                self.log(f"Processing failed: {contig_file}", "WARN")
+        
+        return processed_files
+    
+    def filter_small_fragments(self, input_fasta: str, 
+                              min_fragment_length: int = 100000,
+                              output_prefix: str = "filtered") -> str:
+        """Filter out fragments smaller than specified length - KEEP ORIGINAL SEQUENCE NAMES"""
+        self.log(f"Filtering fragments smaller than {min_fragment_length}bp", "INFO")
+        
+        try:
+            analysis_results = self.analyze_genome_with_module(
+                input_fasta=input_fasta,
+                output_prefix=output_prefix,
+                threads=16,
+                filter_fragments=True,
+                min_fragment_length=min_fragment_length
+            )
+            
+            if analysis_results:
+                # Get filtered file
+                filtered_file = f"{output_prefix}_filtered_sequences.fa"
+                
+                if os.path.exists(filtered_file):
+                    original_length = self.get_fasta_length(input_fasta)
+                    filtered_length = self.get_fasta_length(filtered_file)
+                    
+                    # Check if any sequences were actually removed
+                    original_count = self.count_contigs(input_fasta)
+                    filtered_count = self.count_contigs(filtered_file)
+                    
+                    if filtered_count < original_count:
+                        self.log(f"Filtering removed {original_count - filtered_count} fragments", "INFO")
+                    
+                    if original_length > 0:
+                        filtered_percent = (original_length - filtered_length) / original_length * 100
+                        self.log(f"Filtering results: original {original_length:,}bp → filtered {filtered_length:,}bp "
+                                f"({filtered_percent:.1f}% reduction)", "SUCCESS")
+                    else:
+                        self.log(f"Filtering results: filtered {filtered_length:,}bp", "SUCCESS")
+                    
+                    return filtered_file
+
+            self.log("Filtering failed, returning original file", "WARN")
+            return input_fasta
+            
+        except Exception as e:
+            self.log(f"Fragment filtering failed: {e}", "ERROR")
+            return input_fasta
+    
+    def get_fasta_length(self, fasta_file: str) -> int:
+        """Calculate total length of FASTA file"""
+        total_length = 0
+        try:
+            for record in SeqIO.parse(fasta_file, "fasta"):
+                total_length += len(record.seq)
+        except Exception as e:
+            self.log(f"Failed to calculate FASTA length {fasta_file}: {e}", "WARN")
+        return total_length
     
     def fill_gaps_with_api(self, draft_genome: str, contigs: str, 
                           output_prefix: str, threads: int = 16,
@@ -529,7 +668,7 @@ class AssemblyGapFiller:
                 gap_patches=gap_patches,
                 output_dir=output_dir,
                 output_prefix=base_prefix,
-                flank_size=5000,
+                flank_size=10000,
                 min_alignment_length=1000,
                 min_identity=40.0,
                 max_fill_length=1000000,  # Max 1Mb fill length
@@ -576,87 +715,6 @@ class AssemblyGapFiller:
         except Exception as e:
             self.log(f"API gap filling failed: {e}", "ERROR")
             return None
-    
-    def process_contigs_files(self, contigs_files: List[str]) -> List[str]:
-        """Process all contigs files, return processed file list"""
-        processed_files = []
-        
-        for i, contig_file in enumerate(contigs_files):
-            if not os.path.exists(contig_file):
-                self.log(f"Contigs file not found: {contig_file}", "ERROR")
-                continue
-            
-            self.log(f"Processing contigs file {i+1}: {os.path.basename(contig_file)}", "INFO")
-            
-            file_size = os.path.getsize(contig_file)
-            if file_size == 0:
-                self.log(f"File is empty: {contig_file}", "WARN")
-                continue
-            
-            base_name = os.path.basename(contig_file)
-            name_without_ext = os.path.splitext(base_name)[0]
-            processed_file = f"{name_without_ext}_processed_{self.timestamp}.fa"
-            
-            if self.simple_split_contigs(contig_file, processed_file):
-                # Check processed file
-                if os.path.exists(processed_file) and os.path.getsize(processed_file) > 0:
-                    processed_files.append(processed_file)
-                    self.register_temp_file(processed_file)
-                else:
-                    self.log(f"Processed file invalid: {processed_file}", "WARN")
-            else:
-                self.log(f"Processing failed: {contig_file}", "WARN")
-        
-        return processed_files
-    
-    def filter_small_fragments(self, input_fasta: str, 
-                              min_fragment_length: int = 100000,
-                              output_prefix: str = "filtered") -> str:
-        """Filter out fragments smaller than specified length"""
-        self.log(f"Filtering fragments smaller than {min_fragment_length}bp", "INFO")
-        
-        try:
-            analysis_results = self.analyze_genome_with_module(
-                input_fasta=input_fasta,
-                output_prefix=output_prefix,
-                threads=16,
-                filter_fragments=True,
-                min_fragment_length=min_fragment_length
-            )
-            
-            if analysis_results:
-                # Get filtered file
-                filtered_file = f"{output_prefix}_filtered_sequences.fa"
-                
-                if os.path.exists(filtered_file):
-                    original_length = self.get_fasta_length(input_fasta)
-                    filtered_length = self.get_fasta_length(filtered_file)
-                    
-                    if original_length > 0:
-                        filtered_percent = (original_length - filtered_length) / original_length * 100
-                        self.log(f"Filtering results: original {original_length:,}bp → filtered {filtered_length:,}bp "
-                                f"({filtered_percent:.1f}% reduction)", "SUCCESS")
-                    else:
-                        self.log(f"Filtering results: filtered {filtered_length:,}bp", "SUCCESS")
-                    
-                    return filtered_file
-
-            self.log("Filtering failed, returning original file", "WARN")
-            return input_fasta
-            
-        except Exception as e:
-            self.log(f"Fragment filtering failed: {e}", "ERROR")
-            return input_fasta
-    
-    def get_fasta_length(self, fasta_file: str) -> int:
-        """Calculate total length of FASTA file"""
-        total_length = 0
-        try:
-            for record in SeqIO.parse(fasta_file, "fasta"):
-                total_length += len(record.seq)
-        except Exception as e:
-            self.log(f"Failed to calculate FASTA length {fasta_file}: {e}", "WARN")
-        return total_length
     
     def process_optimized_filling(self, draft_genome: str, contigs_file: str,
                                  threads: int = 16,
@@ -799,7 +857,9 @@ class AssemblyGapFiller:
     
     def create_final_genome(self, original_no_gap: str, filled_genome: str, 
                            output_file: str, prefix: str = "final") -> Dict:
-        """Create final genome file"""
+        """
+        Create final genome file - KEEP ORIGINAL SEQUENCE NAMES (NO PREFIXES ADDED)
+        """
         self.log("Creating final genome", "STEP")
         
         try:
@@ -808,13 +868,18 @@ class AssemblyGapFiller:
                 os.makedirs(output_dir, exist_ok=True)
             
             final_records = []
+            all_ids = set()  # For tracking duplicates
             
+            # Add original chromosomes without gaps - keep original IDs
             if os.path.exists(original_no_gap):
                 for record in SeqIO.parse(original_no_gap, "fasta"):
                     final_records.append(record)
+                    all_ids.add(record.id)
+                    self.log(f"  Adding original (no gap): {record.id}", "DEBUG")
             
-            filled_no_gap = os.path.join(output_dir, f"{prefix}_filled_no_gap.fa")
-            filled_with_gap = os.path.join(output_dir, f"{prefix}_filled_with_gap.fa")
+            # Analyze filled genome
+            filled_no_gap = os.path.join(output_dir, f"{prefix}_filled_no_gap_temp.fa")
+            filled_with_gap = os.path.join(output_dir, f"{prefix}_filled_with_gap_temp.fa")
             
             filled_no_gap, filled_with_gap, filled_summary = self.analyze_and_sort_chromosomes(
                 filled_genome,
@@ -822,36 +887,41 @@ class AssemblyGapFiller:
                 filled_with_gap
             )
             
+            # Add filled chromosomes without gaps - KEEP ORIGINAL IDs, NO PREFIX
             if os.path.exists(filled_no_gap):
                 for record in SeqIO.parse(filled_no_gap, "fasta"):
-                    # Modify ID to avoid duplication
-                    record.id = f"filled_{record.id}"
+                    # Check for duplicate IDs
+                    if record.id in all_ids:
+                        self.log(f"  Warning: Duplicate ID {record.id} - keeping both (may cause issues)", "WARN")
                     final_records.append(record)
+                    all_ids.add(record.id)
+                    self.log(f"  Adding filled (no gap): {record.id}", "DEBUG")
             
+            # Add chromosomes that still have gaps - KEEP ORIGINAL IDs, NO PREFIX
             if os.path.exists(filled_with_gap):
                 for record in SeqIO.parse(filled_with_gap, "fasta"):
-                    record.id = f"unfilled_{record.id}"
+                    if record.id in all_ids:
+                        self.log(f"  Warning: Duplicate ID {record.id} - keeping both (may cause issues)", "WARN")
                     final_records.append(record)
+                    all_ids.add(record.id)
+                    self.log(f"  Adding filled (with gap): {record.id}", "DEBUG")
             
+            # Write final file
             SeqIO.write(final_records, output_file, "fasta")
             
+            # Calculate statistics
             total_bases = sum(len(record.seq) for record in final_records)
-            filled_chromosomes = len([r for r in final_records if r.id.startswith('filled_')])
-            unfilled_chromosomes = len([r for r in final_records if r.id.startswith('unfilled_')])
-            original_chromosomes = len(final_records) - filled_chromosomes - unfilled_chromosomes
             
+            # Simple statistics without relying on prefixes
             summary = {
                 'output_file': output_file,
                 'total_chromosomes': len(final_records),
-                'original_no_gap': original_chromosomes,
-                'filled_no_gap': filled_chromosomes,
-                'still_with_gap': unfilled_chromosomes,
                 'total_bases': total_bases,
                 'filled_summary': filled_summary
             }
             
             self.log(f"Final genome created: {output_file}", "SUCCESS")
-            self.log(f"Chromosome statistics: original {original_chromosomes}, filled without gaps {filled_chromosomes}, still with gaps {unfilled_chromosomes}", "INFO")
+            self.log(f"Total chromosomes: {len(final_records)}", "INFO")
             self.log(f"Total length: {total_bases:,} bp", "INFO")
             
             return summary
@@ -874,6 +944,7 @@ class AssemblyGapFiller:
         """Run complete assembly and gap filling pipeline with improved workflow"""
         self.log(f"Starting integrated genome assembly and gap filling pipeline", "STEP")
         self.log(f"TGS mode: {'ON' if use_tgs else 'OFF'}, Quality filter: {'ON' if quality_filter else 'OFF'}", "INFO")
+        self.log(f"Sequence names: KEEPING ORIGINAL IDs (no prefixes/suffixes added)", "INFO")
         self.verbose = verbose
         
         if assembly_tools:
@@ -887,18 +958,18 @@ class AssemblyGapFiller:
             self.log("Quality filter requested but module not available, disabling quality filter", "WARN")
             quality_filter = False
         
-        # ====================== 修复路径处理 ======================
-        # 确定输出目录
+        # ====================== Fix path handling ======================
+        # Determine output directory
         if '/' in output_prefix:
-            # 如果output_prefix包含路径，提取目录部分
+            # If output_prefix contains path, extract directory part
             output_dir = os.path.dirname(output_prefix)
             base_prefix = os.path.basename(output_prefix)
         else:
-            # 如果只是前缀，在当前目录
+            # If just prefix, use current directory
             output_dir = "."
             base_prefix = output_prefix
         
-        # 确保输出目录存在
+        # Ensure output directory exists
         if output_dir != "." and not os.path.exists(output_dir):
             os.makedirs(output_dir, exist_ok=True)
             self.log(f"Created output directory: {output_dir}", "INFO")
@@ -907,13 +978,13 @@ class AssemblyGapFiller:
         else:
             self.log(f"Output directory: {output_dir}", "INFO")
         
-        # 构建最终输出文件路径
+        # Build final output file paths
         final_output = os.path.join(output_dir, f"{base_prefix}_final.fa")
         summary_file = os.path.join(output_dir, f"{base_prefix}_summary.json")
         
-        # 构建完整的输出前缀（用于内部使用）
+        # Build full output prefix (for internal use)
         full_output_prefix = os.path.join(output_dir, base_prefix)
-        # ====================== 修复结束 ======================
+        # ====================== Fix end ======================
         
         self.log(f"Final output will be: {final_output}", "INFO")
         
@@ -930,7 +1001,7 @@ class AssemblyGapFiller:
             return {"status": "error", "message": "Initial genome analysis failed"}
 
         self.log("Step 2: Detect gaps and sort chromosomes", "STEP")
-        # 使用绝对路径确保文件位置正确
+        # Use absolute paths to ensure correct file locations
         original_no_gap = os.path.join(output_dir, f"{base_prefix}_original_no_gap.fa")
         original_with_gap = os.path.join(output_dir, f"{base_prefix}_original_with_gap.fa")
         
@@ -1075,7 +1146,7 @@ class AssemblyGapFiller:
         complete_summary = {
             "status": "success",
             "timestamp": self.timestamp,
-            "version": "1.5 (Fixed directory nesting issue)",
+            "version": "1.5 (Fixed directory nesting issue, KEEP ORIGINAL SEQUENCE NAMES)",
             "input_file": query_fasta,
             "output_file": final_output,
             "threads_used": threads,
@@ -1107,7 +1178,8 @@ class AssemblyGapFiller:
             "max_gap_size": 1000000,
             "filling_stages": filling_results,
             "final_summary": final_summary,
-            "temp_files": self.temp_files
+            "temp_files": self.temp_files,
+            "sequence_names": "ORIGINAL_NAMES_PRESERVED"  # Add note about sequence names
         }
         
         with open(summary_file, 'w') as f:
@@ -1274,7 +1346,7 @@ def assembly_gap_fill_from_dict(config: Dict) -> Dict:
 def main():
     """Command line interface"""
     parser = argparse.ArgumentParser(
-        description="Integrated Genome Assembly and Gap Filling Pipeline with Quality Assessment",
+        description="Integrated Genome Assembly and Gap Filling Pipeline with Quality Assessment - KEEPS ORIGINAL SEQUENCE NAMES",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Usage examples:
   # Basic usage: Fill gaps using reference contigs (TGS OFF by default)
@@ -1307,6 +1379,8 @@ def main():
   # Show verbose output, enable TGS, enable quality filter
   python assembly_gap_fill.py -q draft.fa -c ref.fa -v --use-tgs
 
+IMPORTANT: This version KEEPS ORIGINAL SEQUENCE NAMES - no prefixes or suffixes are added.
+
 Improved workflow:
   1. Initial genome analysis
   2. Gap detection and chromosome sorting
@@ -1315,7 +1389,7 @@ Improved workflow:
   3c. Merge all contigs into one file
   4. Apply quality assessment and filtering to merged contigs (if enabled)
   5. Optimized filling process (first round → filter <100kb fragments → second round)
-  6. Final genome creation
+  6. Final genome creation (KEEPING ORIGINAL SEQUENCE NAMES)
   7. Results analysis and report generation
   
 Default parameters:
@@ -1378,7 +1452,7 @@ Default parameters:
     
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Show detailed output information')
-    parser.add_argument('--version', action='version', version='Integrated Genome Assembly and Gap Filling Pipeline v1.5')
+    parser.add_argument('--version', action='version', version='Integrated Genome Assembly and Gap Filling Pipeline v1.5 (Keep Original Names)')
     
     # If no arguments, show help
     if len(sys.argv) == 1:
@@ -1409,18 +1483,19 @@ Default parameters:
     
     # Build complete output prefix
     if args.output_dir != '.':
-        # 确保不会创建嵌套目录
+        # Ensure no nested directories
         full_output_prefix = os.path.join(args.output_dir, args.output_prefix)
     else:
         full_output_prefix = args.output_prefix
     
-    # 直接使用output_dir作为输出目录，不再创建子目录
+    # Directly use output_dir as output directory, no subdirectories created
     summary_file = os.path.join(args.output_dir if args.output_dir != '.' else ".", 
                                f"{args.output_prefix}_summary.json")
     
     print(f"[INFO] Output directory: {args.output_dir}")
     print(f"[INFO] Output prefix: {args.output_prefix}")
     print(f"[INFO] Full output prefix: {full_output_prefix}")
+    print(f"[INFO] IMPORTANT: All sequence names will be kept in their original form (no prefixes/suffixes added)")
     
     # Determine which assembly tools to use
     assembly_tools_list = []
@@ -1487,6 +1562,7 @@ Default parameters:
             print(f"Threads: {args.threads}")
             print(f"TGS mode: {'ON' if args.use_tgs else 'OFF'}")
             print(f"Quality filter: {'ON' if quality_filter_enabled else 'OFF'}")
+            print(f"Sequence names: KEPT ORIGINAL (no prefixes/suffixes added)")
             
             summary = results.get('summary', {})
             print(f"Assembly tools: {', '.join(summary.get('assembly_tools', ['All available tools']))}")
@@ -1511,9 +1587,6 @@ Default parameters:
                 print(f"\nChromosome statistics:")
                 print(f"  Total: {final_summary.get('total_chromosomes', 'Unknown')}")
                 print(f"  Total length: {final_summary.get('total_bases', 0):,} bp")
-                print(f"  Original without gaps: {final_summary.get('original_no_gap', 0)}")
-                print(f"  Filled without gaps: {final_summary.get('filled_no_gap', 0)}")
-                print(f"  Still with gaps: {final_summary.get('still_with_gap', 0)}")
             
             # Show quality filter results
             quality_info = summary.get('quality_filter', {})

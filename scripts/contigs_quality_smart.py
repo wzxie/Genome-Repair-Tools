@@ -437,12 +437,15 @@ class QualityPipeline:
         qv_scores: Dict[str, float],
         craq_scores: Dict[str, float]
     ) -> List[Dict]:
-        """Filter contigs and calculate composite scores"""
+        """Filter contigs and calculate composite scores
+        Modified: Keep contig if EITHER length OR QV meets threshold
+        """
         filtered_contigs = []
         
         print(f"\n{'='*60}")
         print("FILTERING CONTIGS")
         print(f"Min QV: {self.config.min_qv}, Min length: {self.config.min_length:,} bp")
+        print(f"Mode: Keep if EITHER length OR QV meets threshold")
         print("="*60)
         
         stats = {
@@ -454,19 +457,23 @@ class QualityPipeline:
         
         for contig_id, contig_data in sequences.items():
             length = contig_data['length']
-            
-            if length < self.config.min_length:
-                continue
-            stats['passed_length'] += 1
-            
             qv = qv_scores.get(contig_id, 0.0)
             
-            if qv < self.config.min_qv:
+            # Check if criteria are met
+            length_pass = length >= self.config.min_length
+            qv_pass = qv >= self.config.min_qv
+            
+            # Only filter if BOTH criteria fail
+            if not length_pass and not qv_pass:
                 continue
-            stats['passed_qv'] += 1
+            
+            # Count passing criteria
+            if length_pass:
+                stats['passed_length'] += 1
+            if qv_pass:
+                stats['passed_qv'] += 1
             
             craq = craq_scores.get(contig_id, 0.0)
-            
             total_score = qv + craq
             
             filtered_contigs.append({
@@ -476,7 +483,9 @@ class QualityPipeline:
                 'length': length,
                 'qv': qv,
                 'craq': craq,
-                'total_score': total_score
+                'total_score': total_score,
+                'passed_length': length_pass,  # For debugging
+                'passed_qv': qv_pass            # For debugging
             })
             stats['final'] += 1
         
@@ -486,11 +495,20 @@ class QualityPipeline:
         print(f"  Total contigs: {stats['total']}")
         print(f"  Passed length filter: {stats['passed_length']}")
         print(f"  Passed QV filter: {stats['passed_qv']}")
-        print(f"  Final retained: {stats['final']}")
+        print(f"  Final retained (met at least one criterion): {stats['final']}")
         
         if filtered_contigs:
             print(f"  Best score: {filtered_contigs[0]['total_score']:.2f}")
             print(f"  Worst retained: {filtered_contigs[-1]['total_score']:.2f}")
+            
+            # Show breakdown of why contigs were retained
+            only_length = sum(1 for c in filtered_contigs if c['passed_length'] and not c['passed_qv'])
+            only_qv = sum(1 for c in filtered_contigs if not c['passed_length'] and c['passed_qv'])
+            both = sum(1 for c in filtered_contigs if c['passed_length'] and c['passed_qv'])
+            print(f"\nRetention breakdown:")
+            print(f"  Met both criteria: {both}")
+            print(f"  Met only length criterion: {only_length}")
+            print(f"  Met only QV criterion: {only_qv}")
         
         return filtered_contigs
     
@@ -557,8 +575,12 @@ class QualityPipeline:
             return False
     
     def parse_merqury_qv_file(self, qv_file: Path) -> Dict[str, float]:
-        """Parse merqury QV file"""
+        """Parse merqury QV file
+        Modified: +inf is converted to 0.0 instead of 40.0
+        """
         qv_scores = {}
+        inf_count = 0
+        error_count = 0
         
         try:
             with open(qv_file, 'r') as f:
@@ -572,17 +594,26 @@ class QualityPipeline:
                         contig = parts[0]
                         qv_str = parts[3]
                         
+                        # Handle +inf specially
                         if qv_str == "+inf":
-                            qv = 40.0
+                            qv = 0.0  # MODIFIED: +inf now becomes 0.0 instead of 40.0
+                            inf_count += 1
                         else:
                             try:
                                 qv = float(qv_str)
                             except ValueError:
                                 qv = 0.0
+                                error_count += 1
                         
                         qv_scores[contig] = qv
             
             print(f"Parsed QV scores for {len(qv_scores)} contigs")
+            print(f"  Note: '+inf' values are now converted to 0.0 (was 40.0 in original)")
+            
+            if inf_count > 0:
+                print(f"  {inf_count} contigs had '+inf' (converted to 0.0)")
+            if error_count > 0:
+                print(f"  {error_count} contigs had invalid values (converted to 0.0)")
             
             if qv_scores:
                 print("Sample QV scores (first 5):")
@@ -819,7 +850,15 @@ class QualityPipeline:
         try:
             with open(output_file, 'w') as f:
                 for contig in contigs:
-                    header = f">{contig['id']} total_score={contig['total_score']:.2f} QV={contig['qv']:.2f} CRAQ={contig['craq']:.2f} length={contig['length']}"
+                    # Add flags to header indicating why contig was retained
+                    criteria = []
+                    if contig.get('passed_length', False):
+                        criteria.append("LENGTH_OK")
+                    if contig.get('passed_qv', False):
+                        criteria.append(f"QV_OK({contig['qv']:.2f})")
+                    criteria_str = ",".join(criteria) if criteria else "NONE"
+                    
+                    header = f">{contig['id']} total_score={contig['total_score']:.2f} QV={contig['qv']:.2f} CRAQ={contig['craq']:.2f} length={contig['length']} [{criteria_str}]"
                     f.write(f"{header}\n")
                     
                     sequence = contig['sequence']
@@ -847,6 +886,9 @@ class QualityPipeline:
                 f.write("="*80 + "\n")
                 f.write("CONTIG QUALITY FILTERING SUMMARY\n")
                 f.write("="*80 + "\n\n")
+                
+                f.write("FILTERING MODE:\n")
+                f.write("  Keep contig if EITHER length OR QV meets threshold\n\n")
                 
                 f.write("PARAMETERS:\n")
                 f.write(f"  Minimum QV: {self.config.min_qv}\n")
@@ -877,6 +919,10 @@ class QualityPipeline:
                 if qv_scores:
                     avg_qv = sum(qv_scores.values()) / len(qv_scores)
                     f.write(f"  Average QV: {avg_qv:.2f}\n")
+                    # Count +inf values (now 0.0)
+                    inf_count = sum(1 for v in qv_scores.values() if v == 0.0)
+                    if inf_count > 0:
+                        f.write(f"  Note: {inf_count} contigs had '+inf' (converted to 0.0)\n")
                 
                 if craq_scores:
                     avg_craq = sum(craq_scores.values()) / len(craq_scores)
@@ -890,6 +936,16 @@ class QualityPipeline:
                     
                     f.write(f"  Contigs retained: {filtered_count} ({filtered_count/len(sequences)*100:.1f}%)\n")
                     f.write(f"  Length retained: {filtered_length:,} bp ({filtered_length/total_length*100:.1f}%)\n\n")
+                    
+                    # Retention breakdown
+                    only_length = sum(1 for c in filtered_contigs if c.get('passed_length', False) and not c.get('passed_qv', False))
+                    only_qv = sum(1 for c in filtered_contigs if not c.get('passed_length', False) and c.get('passed_qv', False))
+                    both = sum(1 for c in filtered_contigs if c.get('passed_length', False) and c.get('passed_qv', False))
+                    
+                    f.write("RETENTION BREAKDOWN:\n")
+                    f.write(f"  Met both criteria: {both}\n")
+                    f.write(f"  Met only length criterion: {only_length}\n")
+                    f.write(f"  Met only QV criterion: {only_qv}\n\n")
                     
                     filtered_lengths = [c['length'] for c in filtered_contigs]
                     filtered_n50 = self.calculate_n50(filtered_lengths)
@@ -905,10 +961,16 @@ class QualityPipeline:
                     
                     f.write("TOP 10 HIGH-QUALITY CONTIGS:\n")
                     f.write("-"*80 + "\n")
-                    f.write("Contig\tLength\tQV\tCRAQ\tTotal Score\n")
+                    f.write("Contig\tLength\tQV\tCRAQ\tTotal Score\tRetention Reason\n")
                     
                     for contig in filtered_contigs[:10]:
-                        f.write(f"{contig['id']}\t{contig['length']:,}\t{contig['qv']:.2f}\t{contig['craq']:.2f}\t{contig['total_score']:.2f}\n")
+                        reason = []
+                        if contig.get('passed_length', False):
+                            reason.append("LENGTH")
+                        if contig.get('passed_qv', False):
+                            reason.append("QV")
+                        reason_str = "+".join(reason) if reason else "UNKNOWN"
+                        f.write(f"{contig['id']}\t{contig['length']:,}\t{contig['qv']:.2f}\t{contig['craq']:.2f}\t{contig['total_score']:.2f}\t{reason_str}\n")
                 else:
                     f.write("  No contigs passed filtering!\n")
             
