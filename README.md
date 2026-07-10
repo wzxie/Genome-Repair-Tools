@@ -1,7 +1,8 @@
 # Genome-Repair-Tools
 Genome Repair Tools (GRT) is an automated pipeline for closing gaps in genome assemblies, with the primary goal of improving assembly contiguity. It is specifically designed to fill missing regions (gaps) in scaffolded or chromosome‑level draft genomes using long‑read sequencing data. Users only need to provide a draft genome together with third‑generation sequencing reads (e.g., PacBio HiFi or ONT); GRT will then automatically locate and repair gaps without manual intervention. For advanced use, individual assembly modules can be selectively enabled or run independently, offering flexibility for custom workflows. In addition, GRT provides a lightweight telomere recovery function that restores terminal repeats when feasible. A schematic overview of the entire workflow is shown in the figure below.
 
-![流程图1 1](https://github.com/user-attachments/assets/62ce2b00-5166-4b34-9a81-fad947eaf2d4)
+<img width="1857" height="543" alt="diagrammatic sketch" src="https://github.com/user-attachments/assets/fe67b5fb-499d-4a22-b35f-6205a0365d3b" />
+
 
 ## Dependencies
 1. python (3.11.14)
@@ -11,8 +12,8 @@ Genome Repair Tools (GRT) is an automated pipeline for closing gaps in genome as
 5. verkko (v2.2.1)
 6. mummer4 (4.0.0rc1)
 7. hifiasm (0.25.0)
-8. craq (latest)
-9. merqury (latest)
+8. craq (v1.10)
+9. merqury (v1.3)
 
 ## Installation
 Run the following command to install GRT and its dependencies.
@@ -34,10 +35,7 @@ genome_repair_tools.py -h
 ## Genome Repair Tools Software Usage
 ### Run the following command to test the pipeline on the example data (approx. 5 min):
 ```
-genome_repair_tools.py -q ./example.fa \
-    --hifi ./example_HiFi.fastq.gz \
-    -t 32 \
-    -o ./output_directory
+genome_repair_tools.py -q ./example.fa --hifi ./example_HiFi.fastq.gz -t 32 -o ./output_directory
 ```
 ### Expected output
 | Directory | Description |
@@ -49,8 +47,7 @@ genome_repair_tools.py -q ./example.fa \
 | `telomere_recover` | input/complete_genome.fasta ；output/final_genome.fasta |
 
 ## Detailed usage instructions 
-- Chinese version: https://share.note.sx/iun7yhmf#TG3w7haQi1Xj3BjMcNYvq2AatNUlb7InqQENd0o1AUA
-- English version: https://share.note.sx/6ga80su1#G3Yetb5y7mtHswv4QqC58Q9fnXQ0wfNgnxU+xIpMOwM
+https://share.note.sx/6ga80su1#G3Yetb5y7mtHswv4QqC58Q9fnXQ0wfNgnxU+xIpMOwM
 # Contact
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
 
