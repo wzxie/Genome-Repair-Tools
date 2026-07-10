@@ -48,7 +48,7 @@ genome_repair_tools.py -q ./example.fa --hifi ./example_HiFi.fastq.gz -t 32 -o .
 | `telomere_recover` | input/complete_genome.fasta ；output/final_genome.fasta |
 
 ## Detailed usage instructions 
-https://share.note.sx/6ga80su1#G3Yetb5y7mtHswv4QqC58Q9fnXQ0wfNgnxU+xIpMOwM
+https://github.com/wzxie/Genome-Repair-Tools/wiki/Main%E2%80%90Controller#overview
 # Contact
 We hope this tools could be helpful for the groups which focused on plants genome assembly, you can use the GitHub page to report issues or email us with any suggestions.
 
